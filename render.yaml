@@ -1,0 +1,10 @@
+# Render Blueprint — deploy mock WebSocket server (thư mục server/) cho Bài 1.
+# Cách dùng: Render Dashboard → New → Blueprint → chọn repo này → Apply.
+services:
+  - type: web
+    name: realtime-ws-lab
+    runtime: node
+    rootDir: server        # chỉ deploy thư mục server/
+    plan: free             # free tier có WebSocket; ngủ sau 15 phút không dùng
+    buildCommand: npm install
+    startCommand: node server.js

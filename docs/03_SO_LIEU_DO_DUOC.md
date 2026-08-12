@@ -13,8 +13,8 @@
 
 | Thí nghiệm | Cấu hình | Kết quả |
 |---|---|---|
-| Reconnect sau máy bay 30s | base ?s, cap ?s, jitter ±?% | chưa đo — chuỗi delay từng lần retry, connect thành công ở lần thứ mấy |
-| Thời gian phát hiện đứt kết nối | có `pingInterval` vs không | chưa đo — bao nhiêu giây mới biết là đứt |
+| Reconnect sau máy bay 30s | base 500ms, cap 30s, full jitter [0,ceiling] | chưa đo — chuỗi delay từng lần retry, connect thành công ở lần thứ mấy |
+| Thời gian phát hiện đứt kết nối | `pingInterval = 20s` vs không | chưa đo — bao nhiêu giây mới biết là đứt |
 | TCP idle bị NAT drop | mạng 4G, không ping, để yên | chưa đo — sau bao lâu thì kết nối chết |
 | Đổi Wi-Fi → 4G | có `ConnectivityObserver` vs không | chưa đo — thời gian tới khi connected lại |
 
