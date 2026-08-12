@@ -1,6 +1,7 @@
 package com.example.realtime_android_lab.socket.ui
 
 import android.widget.Toast
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,8 +10,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -64,10 +67,27 @@ fun SocketDebugScreen(onBack: () -> Unit) {
         OutlinedTextField(
             value = state.url,
             onValueChange = { viewModel.onIntent(SocketIntent.UrlChanged(it)) },
-            label = { Text("URL (emulator: 10.0.2.2 — máy thật: IP LAN của PC)") },
+            label = { Text("URL — hoặc chọn nhanh bên dưới") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
         )
+
+        // Chọn nhanh URL: bấm chip = phát UrlChanged intent (không cần gõ tay).
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            URL_PRESETS.forEach { preset ->
+                FilterChip(
+                    selected = state.url == preset.url,
+                    onClick = { viewModel.onIntent(SocketIntent.UrlChanged(preset.url)) },
+                    label = { Text(preset.label) },
+                )
+            }
+        }
 
         StatusCard(state)
 
@@ -149,3 +169,14 @@ private fun Metric(label: String, value: String) {
         Text(label, style = MaterialTheme.typography.labelSmall)
     }
 }
+
+private data class UrlPreset(val label: String, val url: String)
+
+/** URL chọn sẵn cho các kịch bản test. Server online deploy trên Render. */
+private val URL_PRESETS = listOf(
+    UrlPreset("echo", "wss://realtime-ws-lab.onrender.com/echo"),
+    UrlPreset("slow", "wss://realtime-ws-lab.onrender.com/slow"),
+    UrlPreset("drop", "wss://realtime-ws-lab.onrender.com/drop"),
+    UrlPreset("policy", "wss://realtime-ws-lab.onrender.com/policy"),
+    UrlPreset("local (emulator)", "ws://10.0.2.2:8080/echo"),
+)
