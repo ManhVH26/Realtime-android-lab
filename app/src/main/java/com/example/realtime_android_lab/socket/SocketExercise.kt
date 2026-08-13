@@ -15,13 +15,18 @@ package com.example.realtime_android_lab.socket
  */
 class SocketExercise {
 
-    // ----- 1. Tầng socket phát ra một dòng sự kiện -----
-    // TODO: tạo một luồng bất đồng bộ biểu diễn kết nối, có đủ 4 trạng thái:
+    // ----- 1. Tầng socket phát ra trạng thái và tin nhắn -----
+    // TODO: biểu diễn kết nối bằng luồng bất đồng bộ, có đủ 4 trạng thái:
     //       đang kết nối / đã kết nối / đang nối lại / hỏng hẳn.
-    // TODO: vòng đời của kết nối phải bám theo vòng đời của bên thu (subscriber):
-    //       bên thu dừng thì kết nối phải được đóng và dọn sạch, không để chạy nền.
+    // TODO: trạng thái và tin nhắn có bản chất khác nhau — một cái là GIÁ TRỊ HIỆN TẠI, một
+    //       cái là SỰ KIỆN TRÔI QUA. Tự trả lời: nếu đưa cả hai ra bằng CÙNG một luồng thì
+    //       cái nào sẽ sai, và sai lúc nào? (gợi ý kịch bản: màn hình bị dựng lại trong khi
+    //       kết nối vẫn đang sống).
+    // TODO: quyết định AI SỞ HỮU vòng đời kết nối — nó sống lâu hơn một màn hình hay chết
+    //       cùng màn hình? Viết ra hệ quả của lựa chọn đó khi có HAI màn hình dùng chung
+    //       một kết nối, rồi mới code.
     // TODO: cho phép gửi text ra kết nối đang sống; nếu chưa kết nối thì báo thất bại
-    //       thay vì ném lỗi.
+    //       thay vì ném lỗi. Cẩn thận: "đã tạo socket" KHÁC "đã bắt tay xong".
 
     // ----- 2. Reconnect có kỷ luật -----
     // TODO: khi kết nối chết vì lý do có thể phục hồi, tự nối lại sau một khoảng chờ.

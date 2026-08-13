@@ -20,6 +20,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,7 +39,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
  * Thu [SocketEffect] một lần để hiện Toast.
  */
 @Composable
-fun SocketDebugScreen(onBack: () -> Unit) {
+fun SocketDebugScreen() {
     val context = LocalContext.current
     val viewModel: SocketDebugViewModel = viewModel(
         factory = SocketDebugViewModel.factory(context),
@@ -46,7 +47,7 @@ fun SocketDebugScreen(onBack: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
     // Effect một lần: thu bằng LaunchedEffect, hiện Toast. Không đưa vào state.
-    androidx.compose.runtime.LaunchedEffect(Unit) {
+    LaunchedEffect(Unit) {
         viewModel.effects.collect { effect ->
             when (effect) {
                 is SocketEffect.ShowMessage ->
@@ -56,13 +57,7 @@ fun SocketDebugScreen(onBack: () -> Unit) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("Bài 1 — WebSocket", style = MaterialTheme.typography.titleLarge)
-            OutlinedButton(onClick = onBack) { Text("← Menu") }
-        }
+        Text("Bài 1 — WebSocket", style = MaterialTheme.typography.titleLarge)
 
         OutlinedTextField(
             value = state.url,
@@ -124,9 +119,12 @@ fun SocketDebugScreen(onBack: () -> Unit) {
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
         Text("Log", style = MaterialTheme.typography.titleMedium)
 
+        // reverseLayout = true + danh sách đã đảo = kiểu chat: dòng MỚI NHẤT nằm DƯỚI CÙNG
+        // và viewport tự neo ở đó, không phải cuộn tay khi log chạy.
+        // (Comment cũ ghi "mới nhất nằm trên cùng" là sai — hai lần đảo triệt tiêu nhau.)
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            reverseLayout = true, // dòng mới nhất nằm trên cùng
+            reverseLayout = true,
         ) {
             items(state.log.reversed()) { line ->
                 Text(
@@ -172,11 +170,15 @@ private fun Metric(label: String, value: String) {
 
 private data class UrlPreset(val label: String, val url: String)
 
-/** URL chọn sẵn cho các kịch bản test. Server online deploy trên Render. */
+/**
+ * URL chọn sẵn cho các kịch bản test. Server mock deploy trên Render.
+ *
+ * Chỉ `wss://` — không có preset `ws://` local. Hệ quả: không cần mở `usesCleartextTraffic`,
+ * vì từ API 28 Android chặn cleartext mặc định và ta không còn chỗ nào cần nó.
+ */
 private val URL_PRESETS = listOf(
     UrlPreset("echo", "wss://realtime-ws-lab.onrender.com/echo"),
     UrlPreset("slow", "wss://realtime-ws-lab.onrender.com/slow"),
     UrlPreset("drop", "wss://realtime-ws-lab.onrender.com/drop"),
     UrlPreset("policy", "wss://realtime-ws-lab.onrender.com/policy"),
-    UrlPreset("local (emulator)", "ws://10.0.2.2:8080/echo"),
 )

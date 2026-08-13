@@ -48,7 +48,12 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)   // collectAsStateWithLifecycle
     implementation(libs.androidx.lifecycle.viewmodel.compose)  // viewModel() trong Compose
-    implementation(libs.okhttp) // Bài 1: WebSocket client (kéo theo okio + coroutines qua transitive)
+    // Bài 1: WebSocket client. OkHttp 4.x kéo theo kotlin-stdlib + okio, KHÔNG kéo coroutines.
+    implementation(libs.okhttp)
+    // Khai báo tường minh: trước đây coroutines lọt vào nhờ transitive của lifecycle-runtime-ktx.
+    // Toàn bộ Bài 1 sống bằng coroutines/Flow — không được để nó phụ thuộc may rủi vào
+    // cây phụ thuộc của thư viện khác.
+    implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

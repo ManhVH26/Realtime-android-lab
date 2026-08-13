@@ -36,8 +36,11 @@ npm start        # chạy ở cổng 8080
 | **Emulator** | `ws://10.0.2.2:8080/echo` (10.0.2.2 = máy tính host nhìn từ emulator) |
 | **Máy thật** (cùng Wi-Fi) | `ws://<IP-LAN-của-PC>:8080/echo` — tìm IP bằng `ipconfig` (dòng IPv4) |
 
-> App đã bật `usesCleartextTraffic` để cho phép `ws://` (không mã hoá) khi test cục bộ.
-> Production phải dùng `wss://`.
+> ⚠️ **App hiện KHÔNG kết nối được vào các URL `ws://` trên.** Preset local đã bị bỏ và
+> `app/src/debug/AndroidManifest.xml` đã bị xoá, nên từ API 28 Android chặn cleartext ⇒ OkHttp ném
+> `CLEARTEXT communication not permitted`. Muốn test local trở lại thì tạo lại file đó với
+> `<application android:usesCleartextTraffic="true" />` (đặt ở source set `debug` để release build
+> vẫn bị chặn). Bình thường cứ dùng `wss://` trên Render.
 
 ## Các route để thử từng tình huống
 
@@ -56,4 +59,14 @@ npm start        # chạy ở cổng 8080
 4. **Test reconnect chủ động:** đổi Wi-Fi ↔ 4G giữa chừng → log hiện "mạng trở lại → reconnect NGAY".
 5. **Test dừng hẳn:** URL `/policy` → sau 3s app chuyển `hỏng: server yêu cầu dừng`, KHÔNG nối lại.
 
-Ghi các số quan sát được (chuỗi delay, RTT echo vs slow) vào `docs/03_SO_LIEU_DO_DUOC.md`.
+## Số đo được
+
+Ghi các số quan sát được ở đây. **Chưa đo thì để `chưa đo`, không điền số bịa.**
+
+| Số đo | Giá trị |
+|---|---|
+| Chuỗi delay backoff thực tế (lần 1→5) | chưa đo |
+| RTT route `/echo` | chưa đo |
+| RTT route `/slow` | chưa đo |
+| Thời gian phát hiện half-open (bật máy bay → `đang nối lại`) | chưa đo |
+| Thời gian nối lại sau khi mạng về (tắt máy bay → `đã kết nối`) | chưa đo |

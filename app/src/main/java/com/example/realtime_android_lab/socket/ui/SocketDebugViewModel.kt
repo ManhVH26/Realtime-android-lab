@@ -6,15 +6,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.example.realtime_android_lab.socket.data.AndroidNetworkMonitor
-import com.example.realtime_android_lab.socket.data.RealtimeRepositoryImpl
-import com.example.realtime_android_lab.socket.domain.BackoffPolicy
-import com.example.realtime_android_lab.socket.domain.model.ConnectionEvent
-import com.example.realtime_android_lab.socket.domain.model.ConnectionState
-import com.example.realtime_android_lab.socket.domain.usecase.ConnectUseCase
-import com.example.realtime_android_lab.socket.domain.usecase.DisconnectUseCase
-import com.example.realtime_android_lab.socket.domain.usecase.ObserveConnectionUseCase
-import com.example.realtime_android_lab.socket.domain.usecase.SendMessageUseCase
+import com.example.realtime_android_lab.socket.di.SocketGraph
+import com.example.realtime_android_lab.socket.domain.ConnectionState
+import com.example.realtime_android_lab.socket.domain.RealtimeRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -30,33 +24,53 @@ import kotlinx.coroutines.launch
 /**
  * BÀI 1 — MVI ViewModel.
  *
- * Luồng một chiều: View phát [SocketIntent] qua [onIntent] → xử lý (gọi use case) →
+ * Luồng một chiều: View phát [SocketIntent] qua [onIntent] → xử lý (gọi repository) →
  * sinh [Change] → [reduce] thuần dựng [SocketUiState] mới → View vẽ lại.
  * Sự kiện một lần (toast) đi qua [effects], KHÔNG nằm trong state.
  *
- * ViewModel chỉ phụ thuộc use case của DOMAIN — không biết OkHttp/ConnectivityManager.
+ * BA nguồn đổ vào cùng một reducer: intent người dùng, trạng thái kết nối, tin nhắn đến.
+ *
+ * ---
+ * VÌ SAO KHÔNG CÓ UseCase
+ *
+ * Bản trước có 5 class use case, mỗi class đúng một dòng `= repository.x()`. Chúng không
+ * thêm hành vi, không thêm ràng buộc, chỉ thêm một tầng gõ tên. Chiều phụ thuộc vẫn đúng
+ * mà không cần chúng: ViewModel phụ thuộc **interface [RealtimeRepository] của domain**,
+ * không phụ thuộc implementation ở data.
+ *
+ * Nếu bị hỏi "Clean Architecture mà không có UseCase?" — trả lời: UseCase là nơi đặt
+ * business rule; ở đây chưa có rule nào (không auth, không dedup, không ordering) nên nó
+ * là ceremony. Rule đầu tiên xuất hiện (chặn gửi khi token hết hạn, rate-limit, dedup
+ * message theo id) thì tạo đúng use case đó — không tạo trước 5 cái rỗng.
  */
 class SocketDebugViewModel(
-    private val observeConnection: ObserveConnectionUseCase,
-    private val connectUseCase: ConnectUseCase,
-    private val disconnectUseCase: DisconnectUseCase,
-    private val sendMessage: SendMessageUseCase,
+    private val repository: RealtimeRepository,
 ) : ViewModel() {
 
-    private val _state = MutableStateFlow(SocketUiState())
+    /**
+     * State ban đầu LẤY TỪ trạng thái thật của kết nối, không mặc định Disconnected.
+     *
+     * Kết nối sống theo process, ViewModel này thì không: Activity destroy hẳn rồi dựng lại
+     * (đổi ngôn ngữ hệ thống, process bị kill rồi restore, back rồi vào lại màn) sẽ tạo
+     * ViewModel MỚI trên một kết nối ĐANG SỐNG. Đọc `.value` ngay tại đây nên frame đầu đã
+     * đúng, không nhá "chưa kết nối" rồi mới sửa.
+     *
+     * `url` vẫn là mặc định — URL là dữ liệu của MÀN HÌNH (người dùng gõ vào), không phải
+     * trạng thái của kết nối. Kết nối đang sống có thể trỏ URL khác với ô text; lab chấp
+     * nhận, app thật có một URL cấu hình duy nhất nên vấn đề này không tồn tại.
+     */
+    private val _state = MutableStateFlow(SocketUiState(state = repository.connectionState.value))
     val state: StateFlow<SocketUiState> = _state.asStateFlow()
 
     private val _effects = Channel<SocketEffect>(Channel.BUFFERED)
     val effects: Flow<SocketEffect> = _effects.receiveAsFlow()
 
     private var pingJob: Job? = null
-    private var lastPingSentAt = 0L
 
     init {
-        // Nguồn thứ hai (ngoài Intent) đổ vào cùng một reducer: sự kiện từ repository.
-        viewModelScope.launch {
-            observeConnection().collect(::onConnectionEvent)
-        }
+        // Hai dòng riêng biệt vì hai bản chất khác nhau: trạng thái có replay, tin nhắn không.
+        viewModelScope.launch { repository.connectionState.collect(::onConnectionState) }
+        viewModelScope.launch { repository.messages.collect(::onMessage) }
     }
 
     /** Cửa vào DUY NHẤT của mọi ý định người dùng. */
@@ -70,24 +84,23 @@ class SocketDebugViewModel(
         }
     }
 
-    // ----- xử lý intent (side effect: gọi use case) rồi phát Change -----
+    // ----- xử lý intent (side effect: gọi repository) rồi phát Change -----
 
     private fun connect() {
         val url = _state.value.url
         dispatch(Change.Log("bắt đầu kết nối tới $url"))
-        connectUseCase(url)
-        startPingLoop()
+        repository.connect(url)
+        // KHÔNG bật ping ở đây — ping bám theo trạng thái thật, xem onConnectionState().
     }
 
     private fun disconnect() {
-        pingJob?.cancel()
-        pingJob = null
-        disconnectUseCase()
+        stopPingLoop()
+        repository.disconnect()
         dispatch(Change.Log("người dùng ngắt kết nối"))
     }
 
     private fun sendTest() {
-        val ok = sendMessage("hello ${_state.value.log.size}")
+        val ok = repository.send("hello ${_state.value.log.size}")
         if (ok) {
             dispatch(Change.Log("gửi: hello"))
         } else {
@@ -95,13 +108,20 @@ class SocketDebugViewModel(
         }
     }
 
+    /**
+     * Gửi một ping mang theo mốc thời gian TRONG chính message.
+     *
+     * `elapsedRealtime()` chứ không phải `currentTimeMillis()`: nó đếm từ lúc boot và đơn
+     * điệu tăng, không bị nhảy khi NTP chỉnh giờ hay người dùng đổi múi giờ giữa lúc đo —
+     * đo khoảng thời gian thì luôn dùng đồng hồ đơn điệu.
+     */
     private fun ping() {
-        lastPingSentAt = SystemClock.elapsedRealtime()
-        if (sendMessage("PING:$lastPingSentAt")) dispatch(Change.Log("ping…"))
+        val sentAt = SystemClock.elapsedRealtime()
+        if (repository.send("$PING_PREFIX$sentAt")) dispatch(Change.Log("ping…"))
     }
 
     private fun startPingLoop() {
-        pingJob?.cancel()
+        if (pingJob?.isActive == true) return // đang chạy rồi thì thôi
         pingJob = viewModelScope.launch {
             while (isActive) {
                 delay(PING_EVERY_MS)
@@ -110,25 +130,40 @@ class SocketDebugViewModel(
         }
     }
 
-    private fun onConnectionEvent(event: ConnectionEvent) {
-        when (event) {
-            is ConnectionEvent.StateChanged -> {
-                dispatch(Change.State(event.state))
-                dispatch(Change.Log("state: ${event.state.label()}"))
-            }
+    private fun stopPingLoop() {
+        pingJob?.cancel()
+        pingJob = null
+    }
 
-            is ConnectionEvent.Message -> onMessage(event.text)
-        }
+    // Tên tham số là `newState` để không che mất property `state` của ViewModel.
+    private fun onConnectionState(newState: ConnectionState) {
+        // Ping bám theo TRẠNG THÁI THẬT, không theo nút bấm.
+        // Bản cũ bật ping ngay lúc bấm "Kết nối" và không bao giờ tắt: vào Failed
+        // (route /policy) hay đang Reconnecting vẫn ping đều 10s/lần vô ích.
+        if (newState == ConnectionState.Connected) startPingLoop() else stopPingLoop()
+
+        dispatch(Change.State(newState))
+        dispatch(Change.Log("state: ${newState.label()}"))
     }
 
     private fun onMessage(text: String) {
-        if (text.startsWith("PING:")) {
-            val rtt = SystemClock.elapsedRealtime() - lastPingSentAt
-            dispatch(Change.Rtt(rtt))
-            dispatch(Change.Log("pong ← RTT = ${rtt}ms"))
-        } else {
+        val sentAt = text.takeIf { it.startsWith(PING_PREFIX) }
+            ?.removePrefix(PING_PREFIX)
+            ?.toLongOrNull()
+
+        if (sentAt == null) {
             dispatch(Change.Log("nhận: $text"))
+            return
         }
+
+        // RTT tính từ mốc NẰM TRONG chính message trả về.
+        // Bản cũ trừ theo một biến `lastPingSentAt` bị ghi đè bởi mọi ping — khi có 2 ping
+        // bay đồng thời (route /slow trễ 2s, hoặc bấm Ping tay xen với ping tự động) thì
+        // pong của ping thứ nhất bị trừ theo mốc của ping thứ hai ⇒ RTT ra số vô nghĩa
+        // (thậm chí âm). Nhét mốc vào payload là cách chuẩn, cũng là cách WebRTC/RTCP làm.
+        val rtt = SystemClock.elapsedRealtime() - sentAt
+        dispatch(Change.Rtt(rtt))
+        dispatch(Change.Log("pong ← RTT = ${rtt}ms"))
     }
 
     // ----- reducer: (State, Change) -> State, THUẦN, là chỗ duy nhất tạo state mới -----
@@ -154,29 +189,44 @@ class SocketDebugViewModel(
         data class Log(val line: String) : Change
     }
 
+    /**
+     * CHỈ dừng vòng ping — KHÔNG ngắt kết nối.
+     *
+     * Bản trước gọi `disconnect()` ở đây, và nó tự phủ định lý do tồn tại của [SocketGraph]:
+     * dựng repository thành singleton theo Application để kết nối sống lâu hơn màn hình, rồi
+     * lại giết nó ngay khi màn hình chết. Khi có HAI màn dùng chung MỘT kết nối thì hỏng
+     * thật: pop màn A ⇒ onCleared ⇒ disconnect ⇒ màn B đứt kết nối.
+     *
+     * Còn ping thì ĐÚNG là của màn hình: nó chỉ để đo RTT cho màn debug này, không phải
+     * keep-alive (keep-alive là ping/pong tầng WebSocket do OkHttp làm, ở tầng data). pingJob
+     * nằm trong viewModelScope nên tự chết cùng ViewModel; gọi tường minh để ý định hiện rõ.
+     *
+     * Đánh đổi đang chấp nhận: rời màn hình mà chưa bấm "Ngắt" thì vòng reconnect vẫn chạy
+     * nền tới khi process chết (xấu nhất 1 lần thử mỗi 30s do backoff có trần). Với lab thì
+     * đây còn là tính năng — background app rồi xem nó nối lại. App thật phải buộc kết nối
+     * vào vòng đời PROCESS foreground (ProcessLifecycleOwner) hoặc vào phiên đăng nhập.
+     */
     override fun onCleared() {
-        disconnectUseCase()
+        super.onCleared()
+        stopPingLoop()
     }
 
     companion object {
         private const val PING_EVERY_MS = 10_000L
         private const val MAX_LOG_LINES = 100
 
-        /** DI thủ công (lab không dùng Hilt): dựng graph data→domain→ui cho `viewModel()`. */
+        /** Tiền tố đánh dấu message dùng để đo RTT (server route /echo trả nguyên văn). */
+        private const val PING_PREFIX = "PING:"
+
+        /**
+         * DI thủ công (lab không dùng Hilt).
+         *
+         * Repository lấy từ [SocketGraph] — singleton theo Application. Trước đây factory này
+         * TỰ dựng repository, nghĩa là kết nối realtime có vòng đời của màn hình: sai bản
+         * chất, và rò rỉ OkHttpClient + NetworkCallback qua mỗi lần Activity dựng lại.
+         */
         fun factory(context: Context) = viewModelFactory {
-            initializer {
-                val appContext = context.applicationContext
-                val repository = RealtimeRepositoryImpl(
-                    backoff = BackoffPolicy(),
-                    networkMonitor = AndroidNetworkMonitor(appContext),
-                )
-                SocketDebugViewModel(
-                    observeConnection = ObserveConnectionUseCase(repository),
-                    connectUseCase = ConnectUseCase(repository),
-                    disconnectUseCase = DisconnectUseCase(repository),
-                    sendMessage = SendMessageUseCase(repository),
-                )
-            }
+            initializer { SocketDebugViewModel(SocketGraph.repository(context)) }
         }
     }
 }
