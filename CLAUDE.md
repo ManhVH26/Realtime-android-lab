@@ -58,8 +58,14 @@ một cơ chế, hoặc khi ôn phỏng vấn (có mục Q&A ở cuối).
 **Tôi tự chạy, Claude chỉ viết lệnh ra kèm giải thích lệnh đó làm gì:**
 - `.\gradlew.bat ...` (build / sync / assemble)
 - `npm install`, `node server.js`
-- `git add` / `commit` / `push` — **không commit hộ tôi trong mọi trường hợp**
 - `adb`
+
+**Git — quy tắc riêng:** Claude **được phép** `add` / `commit` / `push`, nhưng **chỉ khi tôi
+yêu cầu tường minh** (gọi `/git`, hoặc bảo thẳng "commit đi", "push lên"). **Không bao giờ tự
+commit** sau khi sửa xong code, dù thấy việc đã hoàn thành. Sửa xong thì dừng và nhắc tôi.
+
+Khi tôi đã cho phép: tách commit theo chủ đề (docs / feat / fix riêng nhau), quét secret trước
+khi commit, và **báo lại hash + message** đã tạo.
 
 Máy tôi: **Windows 11 + PowerShell**, Android Studio.
 Lưu ý PowerShell: dùng `.\gradlew.bat`, không phải `./gradlew`; `&&` không hoạt động →
@@ -111,15 +117,16 @@ Claude **được phép** tự làm: đọc/ghi file source, sửa Gradle script
 
 ## 7. Cấu trúc code WebSocket hiện tại
 
-**9 file, không hơn.** Đã cố tình gộp: mỗi khái niệm một file, không tách type ra file riêng
+**10 file, không hơn.** Đã cố tình gộp: mỗi khái niệm một file, không tách type ra file riêng
 chỉ để cho "đúng convention".
 
 ```
 app/src/main/java/com/example/realtime_android_lab/
+├── RealtimeLabApp.kt                 # Application: startKoin (phải khai android:name trong manifest)
 ├── MainActivity.kt                   # menu tối giản
 └── socket/
     ├── SocketExercise.kt             # BÀI TẬP của tôi — chỉ TODO, không lời giải
-    ├── di/SocketGraph.kt             # DI thủ công, repository singleton theo Application
+    ├── di/SocketModule.kt            # Koin module, repository là single theo Application
     ├── domain/                       # KHÔNG được biết OkHttp / Android là gì
     │   ├── RealtimeRepository.kt      #   interface + ConnectionState + CloseReason
     │   ├── NetworkMonitor.kt          #   interface + NetworkStatus
@@ -132,6 +139,12 @@ app/src/main/java/com/example/realtime_android_lab/
         ├── SocketDebugViewModel.kt    #   MVI: Intent → reduce → State, Effect qua Channel
         └── SocketDebugScreen.kt
 ```
+
+**DI bằng Koin 4.2.1** (không phải Hilt — quyết định đã chốt). Lý do: graph chỉ 6 node, Koin
+không cần Gradle plugin / KSP / codegen nên **không có rủi ro tương thích với AGP 9**, và trọng
+tâm ôn tập là realtime chứ không phải DI. Cái giá: Koin là **service locator**, phân giải lúc
+CHẠY ⇒ thiếu binding = crash khi mở màn chứ không phải lỗi build. Vì vậy `SocketModuleTest`
+(gọi `socketModule.verify()`) là **bắt buộc**, không được xoá — nó thay vai trò compiler.
 
 **KHÔNG có tầng UseCase.** Trước có 5 class, mỗi class một dòng `= repository.x()` — không
 thêm hành vi nào. ViewModel phụ thuộc trực tiếp **interface `RealtimeRepository` của domain**,
@@ -160,7 +173,8 @@ Server mock (route `/echo`, `/slow`, `/drop`, `/policy`) deploy trên Render:
 - Tách module `:core-network` để **compiler** chặn domain import OkHttp, thay vì tự giữ kỷ luật.
 - Thêm `turbine` + `kotlinx-coroutines-test` + `mockwebserver` vào catalog; viết test cho
   reducer và cho vòng lặp reconnect. Hiện chỉ có `BackoffPolicyTest`.
-- `SocketGraph` → Hilt `@Singleton` (đang là service locator).
+- ~~`SocketGraph` → Hilt~~ **Đã làm bằng Koin** (xem mục 7). Vẫn là service locator về bản
+  chất; nếu muốn verify lúc biên dịch thì hướng đi là `koin-annotations` (KSP) hoặc Hilt.
 - Dời logic đo RTT (`PING_PREFIX`, parse payload) từ ViewModel xuống tầng data — format wire
   message không phải việc của UI.
 - Hoist ViewModel ra khỏi `SocketDebugScreen` (nhận `state` + `onIntent`) để preview được.
