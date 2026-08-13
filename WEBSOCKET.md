@@ -1,48 +1,159 @@
-# WebSocket — lý thuyết & giải thích code
+# WebSocket — từ số 0
 
-Tài liệu này gồm 2 phần:
-- **Phần A**: lý thuyết giao thức (thứ bị hỏi trong phỏng vấn).
-- **Phần B**: code trong `app/src/main/java/.../socket/` hoạt động thế nào, và **vì sao** viết vậy.
+Đọc từ trên xuống. **Phần A** dạy giao thức cho người chưa biết gì về WebSocket (nhưng biết lập
+trình). **Phần B** giải thích code trong `app/.../socket/`.
 
 ---
 
-# PHẦN A — LÝ THUYẾT
+# PHẦN A — GIAO THỨC
 
-## A1. Vấn đề WebSocket sinh ra để giải quyết
+## A1. Bài toán: server muốn nói trước
 
-HTTP là **request/response, một chiều**: client hỏi, server mới được trả lời. Server **không có
-cách nào chủ động đẩy** dữ liệu xuống.
+Bạn làm app chat. Người B gửi tin nhắn cho người A. **Điện thoại của A làm sao biết có tin mới?**
 
-Bốn cách né, xếp theo độ tệ:
+Nghe thì tưởng dễ, nhưng HTTP — thứ mọi app Android đang dùng để gọi API — **không làm được việc
+này**. HTTP chỉ có đúng một kiểu tương tác:
 
-| Cách | Cơ chế | Vấn đề |
+```
+client:  "cho tôi /messages"      ← client PHẢI hỏi trước
+server:  "đây, 3 tin nhắn"        ← server chỉ được TRẢ LỜI
+                                  ← xong. Kết nối đóng. Hết chuyện.
+```
+
+Server **không có cách nào bắt đầu một câu chuyện**. Nó chỉ biết trả lời. Muốn nói gì với client
+thì phải đợi client hỏi.
+
+> Ví von: HTTP giống bạn nhắn tin cho tổng đài. Bạn hỏi thì họ đáp. Họ **không có số của bạn**,
+> nên có tin gì hay ho cũng đành ngồi im đợi bạn hỏi lại.
+
+Đây không phải lỗi thiết kế — HTTP sinh ra năm 1991 để tải trang web tĩnh, việc đó thì
+request/response là đủ và tối ưu. Nhưng chat, thông báo, giá cổ phiếu, vị trí tài xế, cuộc gọi —
+tất cả đều cần **server nói trước**.
+
+## A2. Ba cách chống chế (và vì sao chúng không đủ)
+
+Trước khi WebSocket ra đời (2011), người ta lách bằng ba cách. Hiểu chúng thì mới thấy WebSocket
+giải quyết đúng cái gì.
+
+### Cách 1 — Short polling: cứ hỏi liên tục
+
+```
+client: "có gì mới không?"  → server: "không"     (0 giây)
+client: "có gì mới không?"  → server: "không"     (2 giây)
+client: "có gì mới không?"  → server: "không"     (4 giây)
+client: "có gì mới không?"  → server: "CÓ! 1 tin" (6 giây)
+```
+
+Đơn giản, code 10 phút xong. Nhưng:
+- Hỏi mỗi 2 giây = **1.800 request/giờ**, và ~99% trả về rỗng.
+- Mỗi request kéo theo full header HTTP (cookie, token, user-agent…) — vài trăm byte cho một câu
+  trả lời "không có gì".
+- **Tốn pin kinh khủng**: mỗi request đánh thức radio 3G/4G. Bật radio tốn năng lượng hơn nhiều so
+  với chính lượng dữ liệu gửi đi.
+- Tin nhắn vẫn **trễ tới 2 giây** — vì phải đợi lần hỏi kế tiếp.
+
+Muốn giảm trễ thì phải hỏi dày hơn, mà hỏi dày hơn thì càng tốn. Đường cùng.
+
+### Cách 2 — Long polling: hỏi rồi bắt server ngậm luôn
+
+```
+client: "có gì mới không?"
+server: ................ (im lặng, GIỮ request treo)
+        ................ (30 giây trôi qua)
+server: "CÓ! 1 tin"      ← chỉ trả lời khi thật sự có tin
+client: "có gì mới không?"  ← hỏi lại ngay
+```
+
+Khá hơn hẳn: không còn request rỗng, tin nhắn về gần như tức thì. Đây là cách Facebook Chat chạy
+những năm 2008. Nhưng:
+- **Mỗi tin nhắn tốn một kết nối mới.** Trả lời xong là request kết thúc, client phải mở lại từ
+  đầu: TCP handshake + TLS handshake ≈ vài trăm ms và vài KB, **cho mỗi tin nhắn**.
+- Proxy và load balancer thường **tự cắt** request treo quá 30–60 giây, nên phải xử lý timeout.
+- Vẫn **một chiều**. Client muốn gửi thì phải mở thêm một request khác.
+
+### Cách 3 — SSE (Server-Sent Events): giữ một kết nối, server đẩy liên tục
+
+Một request HTTP duy nhất, không đóng, server ghi dần dữ liệu xuống. Client đọc tới đâu xử lý tới đó.
+
+Đây gần đúng rồi — một kết nối, nhiều tin nhắn. Nhưng:
+- **Chỉ một chiều** (server → client). Client gửi thì vẫn phải POST riêng.
+- **Chỉ gửi được text**, không gửi được nhị phân (ảnh, audio).
+
+### Cái còn thiếu
+
+Cả ba đều cố nhét một thứ **hai chiều, liên tục** vào một giao thức sinh ra để **một chiều, đứt
+quãng**. Thứ ta thật sự cần:
+
+> Một đường dây **mở sẵn**, **hai bên đều nói được bất cứ lúc nào**, **dùng đi dùng lại** cho mọi
+> tin nhắn.
+
+Đó chính xác là WebSocket.
+
+## A3. WebSocket là gì
+
+**Định nghĩa một câu:** WebSocket là một kết nối TCP được giữ mở, trong đó **hai bên đều được chủ
+động gửi dữ liệu bất cứ lúc nào**, không cần hỏi-đáp.
+
+```
+        ┌──────────── một kết nối TCP duy nhất, mở suốt ────────────┐
+client  │ →  "chào"                                                 │  server
+        │                                        "có tin mới"  ←    │
+        │ →  "ok"                                                   │
+        │                                        "B đang gõ…"  ←    │
+        └───────────────────────────────────────────────────────────┘
+```
+
+Tính chất "hai bên cùng gửi được, kể cả gửi đồng thời" gọi là **full-duplex** (song công). So sánh:
+bộ đàm là half-duplex — một lúc chỉ một người nói. Điện thoại là full-duplex — cả hai cùng nói được
+(dù nghe sẽ hơi rối).
+
+> **Ví von:** HTTP = nhắn tin. WebSocket = **cuộc gọi đang mở**. Đã bắt máy rồi thì ai muốn nói lúc
+> nào cũng được, không phải bấm số lại mỗi câu.
+
+> **Đối chiếu Kotlin:** một HTTP request giống `suspend fun getMessages(): List<Message>` — gọi,
+> chờ, có kết quả, xong. WebSocket giống hai `Channel` chạy ngược chiều nhau đã mở sẵn: không ai
+> "gọi" ai, cả hai cùng `send` và cùng `receive`.
+
+**Rẻ hơn bao nhiêu:** sau khi kết nối đã mở, mỗi tin nhắn chỉ tốn thêm **2–14 byte** header. So với
+HTTP nơi mỗi request kéo theo vài trăm byte header (và có thể cả một vòng TCP/TLS mới).
+
+**Cái giá phải trả — quan trọng, và là toàn bộ nội dung Phần B:** HTTP lo hộ bạn rất nhiều thứ mà
+WebSocket thì không.
+
+| | HTTP | WebSocket |
 |---|---|---|
-| **Short polling** | client gọi API mỗi 2s | 99% request trả về rỗng; tốn pin, tốn băng thông, độ trễ = chu kỳ poll |
-| **Long polling** | server giữ request treo tới khi có data mới | mỗi tin nhắn = 1 vòng TCP/TLS mới; proxy hay tự cắt sau 30–60s |
-| **SSE** (Server-Sent Events) | 1 kết nối HTTP giữ mở, server stream xuống | **một chiều** (chỉ server→client), chỉ gửi được text |
-| **WebSocket** | nâng cấp HTTP thành kênh TCP song công | phức tạp hơn, phải tự lo reconnect/heartbeat |
+| Kết nối đứt | request lỗi, bạn retry request đó | **bạn tự phát hiện, tự nối lại** |
+| Biết đối phương còn sống? | không cần, mỗi request là độc lập | **bạn tự lo (ping/pong)** |
+| Trạng thái | không có (stateless) | **có, và bạn phải quản lý nó** |
 
-WebSocket = **full-duplex** (hai bên gửi bất cứ lúc nào, không cần xin phép) trên **một kết nối
-TCP duy nhất**, sau khi bắt tay xong thì overhead mỗi frame chỉ **2–14 byte** (so với vài trăm
-byte header HTTP mỗi request).
+Nói cách khác: **WebSocket cho bạn cái đường ống, còn giữ cho ống đó không tắc là việc của bạn.**
+Đó là lý do một class "WebSocket client" tử tế dài 250 dòng chứ không phải 20.
 
-> Đối chiếu Kotlin: HTTP request/response giống `suspend fun` — gọi, chờ, có kết quả, xong.
-> WebSocket giống một `Channel` hai chiều mở sẵn — không ai "gọi" ai, cả hai cùng đọc/ghi.
+## A4. Kết nối bắt đầu thế nào — handshake
 
-## A2. Handshake — nó vẫn bắt đầu bằng HTTP
+### Vì sao không mở hẳn một port riêng cho gọn?
 
-Client gửi một request HTTP bình thường có header xin nâng cấp:
+Vì bạn sẽ không kết nối được từ 90% mạng công ty, trường học, quán cà phê. Firewall doanh nghiệp
+thường chỉ mở **port 80 (HTTP) và 443 (HTTPS)**. Proxy chỉ hiểu HTTP. Load balancer chỉ định tuyến
+HTTP.
+
+Nên WebSocket chơi bài khôn: **bắt đầu bằng một request HTTP hoàn toàn bình thường**, đi lọt qua
+mọi hạ tầng sẵn có, rồi mới xin đổi giao thức ngay trên kết nối TCP đó.
+
+### Client xin nâng cấp
 
 ```http
 GET /echo HTTP/1.1
 Host: realtime-ws-lab.onrender.com
-Upgrade: websocket
+Upgrade: websocket                          ← "tôi muốn đổi giao thức"
 Connection: Upgrade
-Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==      ← 16 byte ngẫu nhiên, base64
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==  ← 16 byte ngẫu nhiên, mã base64
 Sec-WebSocket-Version: 13
 ```
 
-Server đồng ý:
+Với mọi proxy trên đường đi, đây chỉ là một `GET` bình thường. Nó cho qua.
+
+### Server đồng ý
 
 ```http
 HTTP/1.1 101 Switching Protocols
@@ -51,192 +162,379 @@ Connection: Upgrade
 Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
 ```
 
-`Sec-WebSocket-Accept` = `base64(SHA1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`.
-Chuỗi GUID đó là hằng số ghi cứng trong RFC 6455.
+**`101` là mã trạng thái quan trọng nhất ở đây** — nó nghĩa là "được, từ giây này trở đi kết nối
+TCP này không còn là HTTP nữa". Không phải `200`. Nếu bạn debug và thấy `200`, `404`, `403` thì
+handshake đã hỏng.
 
-**Câu hỏi hay bị hỏi: cái này để làm gì? Nó KHÔNG phải bảo mật.** Nó chứng minh server thật sự
-hiểu giao thức WebSocket chứ không phải một cache/proxy ngây thơ vô tình trả về 101. Không có nó,
-kẻ tấn công có thể lừa proxy cache một response và đầu độc kết nối sau.
+**Sau `101`: cùng một kết nối TCP, nhưng đổi ngôn ngữ.** Không còn header, không còn status code,
+không còn URL. Từ đây chỉ còn **frame nhị phân** của WebSocket (mục A5).
 
-**Vì sao handshake dùng HTTP:** để đi xuyên được hạ tầng sẵn có — port 80/443, proxy doanh
-nghiệp, load balancer, firewall. Nếu WebSocket dùng port riêng thì bị chặn ở 90% mạng công ty.
+### `Sec-WebSocket-Key` / `Accept` để làm gì?
 
-Sau `101`, **kết nối TCP đó không còn là HTTP nữa**. Không còn header, không còn status code —
-chỉ còn frame nhị phân của WebSocket.
+Đây là câu hay bị hỏi và hay bị trả lời sai. **Nó KHÔNG phải bảo mật, KHÔNG phải xác thực.**
 
-## A3. Frame — cấu trúc gói tin
+Server tính:
 
 ```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-------+-+-------------+-------------------------------+
-|F|R|R|R| opcode|M| Payload len |    Extended payload length     |
-|I|S|S|S|  (4)  |A|     (7)     |            (16/64)             |
-|N|V|V|V|       |S|             |                               |
-| |1|2|3|       |K|             |                               |
-+-+-+-+-+-------+-+-------------+-------------------------------+
-|         Masking-key (4 byte, chỉ khi MASK=1)                  |
-+---------------------------------------------------------------+
-|                        Payload Data                            |
-+---------------------------------------------------------------+
+Accept = base64( SHA1( Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ) )
 ```
 
-| Trường | Ý nghĩa |
+Chuỗi GUID kia là **hằng số ghi cứng trong RFC 6455** — ai cũng biết, không phải bí mật. Vậy nó
+chứng minh cái gì? Chứng minh **server thật sự hiểu WebSocket**, chứ không phải một proxy/cache
+ngây thơ tình cờ trả về `101`.
+
+Tình huống nó chặn: kẻ tấn công dụ được một proxy trung gian cache lại một response trông giống
+`101`. Client sau kết nối vào, tưởng đã bắt tay xong với server thật, nhưng thực ra đang nói chuyện
+với rác trong cache. Bắt buộc phải tính đúng `Accept` từ `Key` **ngẫu nhiên của riêng lần này** thì
+response cache lại không bao giờ khớp.
+
+## A5. Dữ liệu đi qua kiểu gì — frame
+
+### Vấn đề: TCP không có khái niệm "tin nhắn"
+
+Đây là chỗ hầu hết tài liệu bỏ qua, mà không hiểu nó thì không hiểu vì sao có "frame".
+
+**TCP là một dòng byte liên tục.** Nó đảm bảo byte tới đủ và đúng thứ tự, nhưng **không** đảm bảo
+ranh giới. Bạn gửi hai tin:
+
+```
+send("hello")
+send("world")
+```
+
+Bên kia hoàn toàn có thể đọc ra:
+```
+lần đọc 1: "hellowor"
+lần đọc 2: "ld"
+```
+
+TCP không sai — nó chưa bao giờ hứa giữ ranh giới. Nó chỉ hứa: byte nào bạn đưa vào, bên kia nhận
+đúng byte đó, đúng thứ tự.
+
+> **Đối chiếu Kotlin:** TCP giống một `Flow<Byte>`, không phải `Flow<Message>`. Muốn có
+> `Flow<Message>` thì **bạn phải tự gom byte lại và tự cắt**.
+
+Vậy làm sao biết tin nhắn kết thúc ở đâu? Mọi giao thức đều phải tự giải quyết:
+- HTTP dùng header `Content-Length: 42` (hoặc chunked encoding).
+- WebSocket dùng **frame**.
+
+### Frame = một cái nhãn nhỏ dán trước dữ liệu
+
+Mỗi lần gửi, WebSocket bọc dữ liệu trong một frame. Nhãn (header) chỉ **2–14 byte**, nói ba điều:
+
+1. **Đây là loại gì?** → trường `opcode`
+2. **Dài bao nhiêu byte?** → trường `payload length`
+3. **Đã hết tin chưa hay còn phần sau?** → cờ `FIN`
+
+Đọc frame thì chỉ việc: đọc nhãn → biết cần đọc thêm bao nhiêu byte nữa → đọc đúng chừng đó → xong
+một tin. Ranh giới rõ ràng.
+
+### `opcode` — frame này là loại gì
+
+| opcode | Loại | Nghĩa |
+|---|---|---|
+| `0x1` | **text** | dữ liệu, chuỗi UTF-8 |
+| `0x2` | **binary** | dữ liệu, byte thô (ảnh, audio, protobuf) |
+| `0x0` | continuation | "đây là phần tiếp của tin trước" |
+| `0x8` | **close** | "tôi đóng đây" |
+| `0x9` | **ping** | "còn sống không?" |
+| `0xA` | **pong** | "còn" |
+
+Ba cái cuối gọi là **control frame** — chúng không phải dữ liệu của bạn, mà là **giao thức tự nói
+chuyện với nhau**. App bình thường không thấy chúng; thư viện (OkHttp) tự xử lý.
+
+> **Đối chiếu Kotlin:** `opcode` chính là discriminator của một `sealed interface Frame`. Đọc 4 bit
+> đó rồi `when` ra nhánh xử lý — y hệt cách bạn `when (event)` trên một sealed class.
+
+### `FIN` — vì sao cần chẻ nhỏ tin nhắn
+
+Gửi một file 100 MB. Nếu bắt buộc một tin = một frame thì bên gửi phải nạp trọn 100 MB vào RAM để
+tính độ dài trước khi gửi được byte đầu tiên.
+
+`FIN = 0` nghĩa là "còn nữa". Cho phép chẻ một tin thành nhiều frame và **stream** nó đi:
+
+```
+frame 1: opcode=text(0x1),        FIN=0, data="Xin "
+frame 2: opcode=continuation(0x0), FIN=0, data="chào "
+frame 3: opcode=continuation(0x0), FIN=1, data="bạn"     ← FIN=1: hết tin
+```
+
+Bên nhận ghép lại thành `"Xin chào bạn"`. Chỉ frame đầu mang opcode thật; các frame sau là
+`continuation`, nếu không thì bên nhận không phân biệt được "phần tiếp theo" với "một tin mới".
+
+Control frame (ping/pong/close) thì **cấm chẻ**, và payload tối đa **125 byte**. Đổi lại, chúng
+được phép **chen vào giữa** các mảnh của một tin dữ liệu — nếu không, đang gửi file 100 MB thì
+ping bị kẹt đằng sau và bạn không thể kiểm tra kết nối còn sống trong suốt thời gian đó.
+
+### `payload length` — dài co giãn để tiết kiệm
+
+Trường độ dài chỉ 7 bit, đủ đếm tới 125. Tin dài hơn thì:
+
+| Giá trị 7 bit | Nghĩa |
 |---|---|
-| **FIN** | 1 = frame cuối của message. Message dài có thể chẻ nhiều frame (fragmentation). |
-| **opcode** | `0x1` text, `0x2` binary, `0x0` continuation, `0x8` **close**, `0x9` **ping**, `0xA` **pong** |
-| **MASK** | Frame **client → server BẮT BUỘC mask**. Server → client **cấm mask**. |
-| **Payload len** | 0–125 = độ dài luôn; 126 = đọc thêm 2 byte; 127 = đọc thêm 8 byte |
+| `0`–`125` | đó chính là độ dài |
+| `126` | "đọc thêm **2 byte** nữa mới là độ dài thật" (tới 64 KB) |
+| `127` | "đọc thêm **8 byte** nữa" (tới rất lớn) |
 
-> Đối chiếu Kotlin: `opcode` chính là discriminator của một `sealed interface Frame`.
-> `FIN` là cờ "đây là phần tử cuối" — giống `Flow` phát xong thì complete.
+Vì sao rắc rối vậy: 99% tin nhắn chat ngắn hơn 125 byte. Thiết kế này cho chúng chỉ tốn **2 byte**
+header thay vì luôn luôn 10 byte. Với một app chat triệu người dùng, đó là hàng tấn băng thông.
 
-**Vì sao client phải mask?** Không phải để mã hoá (masking key nằm ngay trong frame, ai cũng đọc
-được). Nó chống **cache poisoning**: nếu payload không mask, kẻ tấn công có thể tạo một payload
-trông y hệt một HTTP request hợp lệ, khiến proxy trung gian tưởng đó là request thật và cache lại
-nội dung độc. Mask ngẫu nhiên từng frame làm proxy không bao giờ thấy được chuỗi cố định.
+### `MASK` — vì sao client bắt buộc phải xáo dữ liệu
 
-**Control frame** (close/ping/pong): payload tối đa **125 byte**, **không được fragment**, và
-được phép chen vào giữa các fragment của một message dữ liệu.
+Luật: **frame client → server BẮT BUỘC mask. Server → client CẤM mask.**
 
-## A4. Ping / Pong — và vấn đề half-open
+Mask = XOR payload với một khoá 4 byte ngẫu nhiên, và khoá đó **gửi kèm ngay trong frame**. Nghĩa
+là ai đọc được frame cũng giải mask được — **nó không phải mã hoá**.
 
-Đây là phần quan trọng nhất về mặt thực chiến.
+Vậy để làm gì? Chống **cache poisoning** ở proxy trung gian:
 
-**Half-open connection**: một đầu đã chết (bật máy bay, rớt sóng, process server bị kill -9,
-NAT gateway xoá mapping) nhưng đầu kia **không hề biết**. Nó vẫn thấy socket "mở", vẫn hiển thị
-"đã kết nối", vẫn `send()` thành công — dữ liệu bay vào hư không.
+1. Kẻ tấn công lừa trình duyệt nạn nhân mở WebSocket tới server của hắn.
+2. Hắn gửi qua kết nối đó một payload trông **y hệt một HTTP request hợp lệ**
+   (`GET /jquery.js HTTP/1.1...`).
+3. Proxy cũ kỹ trên đường đi đọc dòng byte đó, tưởng là một HTTP request thật, và **cache lại
+   response độc hại** dưới tên `/jquery.js`.
+4. Mọi người dùng khác qua proxy đó tải `jquery.js` sẽ nhận file của hacker.
 
-Vì sao TCP không tự phát hiện:
-- TCP **không gửi gì khi im lặng**. Không có traffic thì không có cách nào biết đầu kia còn sống.
-- `SO_KEEPALIVE` của TCP mặc định **tắt**, và khi bật thì mặc định Linux là **2 tiếng** mới thăm
-  dò lần đầu. Vô dụng cho chat.
-- Nếu bạn `send()` vào một kết nối đã chết, TCP sẽ retransmit theo cấp số nhân và chỉ báo lỗi sau
-  **~15 phút** (`tcp_retries2` = 15 lần trên Linux).
+Mask với khoá **ngẫu nhiên mỗi frame** khiến kẻ tấn công không thể điều khiển được chuỗi byte thật
+sự đi trên dây ⇒ không dựng được request giả. Server không cần mask vì kẻ tấn công không điều khiển
+được server.
 
-> Đối chiếu Kotlin: half-open giống `await()` trên một `CompletableDeferred` mà **không ai bao giờ
-> gọi `complete()`**. Không có exception, không có gì hết — chỉ treo mãi. Và đây đúng nghĩa đen là
-> cái đang xảy ra trong `connectOnce()` của chúng ta.
+### Ráp lại — sơ đồ frame
 
-**Giải pháp: ping/pong ở tầng WebSocket.** Client gửi frame `0x9` (ping) định kỳ; peer **bắt buộc
-theo RFC** phải trả frame `0xA` (pong) sớm nhất có thể. Không thấy pong trong khoảng thời gian
-định trước ⇒ kết luận kết nối đã chết, chủ động huỷ và nối lại.
+```
+byte 0        byte 1        byte 2..9            byte tiếp        phần còn lại
+┌──────────┐  ┌──────────┐  ┌────────────────┐   ┌───────────┐   ┌─────────────┐
+│FIN RSV op│  │MASK  len │  │ độ dài mở rộng │   │ mask key  │   │   payload   │
+│ 1   3  4 │  │  1    7  │  │ (0, 2 hoặc 8 B)│   │ (0 / 4 B) │   │             │
+└──────────┘  └──────────┘  └────────────────┘   └───────────┘   └─────────────┘
+```
+
+Nhỏ nhất: **2 byte** (server→client, tin ngắn). Lớn nhất: **14 byte** (client→server, tin rất dài).
+`RSV` là 3 bit dự trữ cho extension (ví dụ nén `permessage-deflate`), bình thường bằng 0.
+
+## A6. Giữ kết nối sống — và cái bẫy tên là "half-open"
+
+### Kịch bản
+
+Bạn đang chat, bước vào thang máy, mất sóng 30 giây, đi ra. Nhìn app: **vẫn hiện "đang kết nối"**.
+Bạn gõ một tin, bấm gửi. Ứng dụng báo gửi thành công. **Nhưng người kia không bao giờ nhận được.**
+
+Đây là **half-open connection**: một đầu đã chết, đầu kia **không hề biết**.
+
+### Vì sao TCP không tự phát hiện
+
+Ba lý do, cộng lại thành thảm hoạ:
+
+1. **TCP không gửi gì khi im lặng.** Không có traffic thì tuyệt đối không có tín hiệu nào để suy ra
+   đầu kia còn sống hay đã chết. Kết nối "mở" chỉ là một dòng trong bảng của hệ điều hành.
+2. **`SO_KEEPALIVE` mặc định TẮT**, và khi bật thì Linux mặc định **2 tiếng** mới thăm dò lần đầu.
+   Vô dụng với chat.
+3. **Ghi vào kết nối đã chết cũng không báo lỗi ngay.** TCP sẽ retransmit theo cấp số nhân và chỉ
+   chịu bỏ cuộc sau **hàng chục phút**. `send()` của bạn trả về thành công vì nó chỉ có nghĩa "đã
+   xếp vào buffer của kernel", không có nghĩa "đã tới nơi".
+
+> **Đối chiếu Kotlin:** half-open giống `await()` trên một `CompletableDeferred` mà **không ai bao
+> giờ gọi `complete()`**. Không exception, không log, không gì cả — chỉ treo vĩnh viễn. Và đây đúng
+> nghĩa đen là chuyện xảy ra trong `connectOnce()` ở Phần B.
+
+### Còn NAT nữa
+
+Nhà bạn có 20 thiết bị nhưng chỉ **một IP công cộng**. Router phải nhớ "gói tin về cổng 54321 là
+của điện thoại Nam" — bảng ghi nhớ đó gọi là **NAT mapping**.
+
+Bảng có hạn, nên **router tự xoá những mapping im lặng quá lâu**. Trên mạng di động, ngưỡng này
+thường chỉ **30 giây đến vài phút** (chuẩn khuyến nghị dài hơn nhiều, nhưng nhà mạng không theo).
+
+Mapping bị xoá ⇒ gói tin server gửi về không biết đi đâu ⇒ **rơi im lặng**. Không ai được báo. Lại
+half-open, lần này do hạ tầng chứ chẳng ai chết cả.
+
+### Lời giải: ping/pong ở tầng WebSocket
+
+Nhớ `opcode 0x9` và `0xA` ở A5? Đây là lúc dùng chúng.
+
+```
+client → ping (0x9)        ← định kỳ, ví dụ 20 giây một lần
+server → pong (0xA)        ← RFC BẮT BUỘC trả lời, càng sớm càng tốt
+```
+
+Không thấy pong trong khoảng thời gian đã định ⇒ kết luận kết nối đã chết ⇒ huỷ và nối lại.
 
 Nó giải quyết **hai** việc cùng lúc:
-1. **Phát hiện chết sớm** — 20 giây thay vì 15 phút.
-2. **Giữ NAT mapping sống** — router/carrier NAT xoá mapping của kết nối im lặng sau khoảng
-   **30 giây – 5 phút** (mạng di động thường ngắn nhất). Traffic định kỳ giữ mapping không bị dọn.
+1. **Phát hiện chết sớm** — 20 giây thay vì hàng chục phút.
+2. **Giữ NAT mapping sống** — có traffic đều đặn thì router không xoá.
 
-Chọn chu kỳ ping là đánh đổi: ngắn quá thì tốn pin (mỗi ping đánh thức radio, mà chuyển
-radio từ idle → active tốn nhiều năng lượng hơn chính gói tin), dài quá thì NAT chết và phát hiện
-lỗi chậm. **20–30 giây** là vùng phổ biến.
+Chu kỳ ping là một đánh đổi thật sự: quá ngắn thì tốn pin (mỗi ping đánh thức radio, mà chuyển
+radio từ ngủ sang thức tốn năng lượng hơn nhiều so với chính gói tin), quá dài thì NAT chết và phát
+hiện lỗi chậm. **20–30 giây** là vùng đa số app chọn. Trong project này:
+`OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS)` — **một dòng**, OkHttp lo phần còn lại.
 
-> Lưu ý phân biệt: **ping/pong tầng WebSocket** (frame 0x9/0xA, OkHttp tự làm, invisible với code
-> app) khác với **"ping" mà màn debug của chúng ta gửi** — cái sau là một text message thường
-> `"PING:<timestamp>"` để đo RTT. Đừng lẫn hai thứ khi bị hỏi.
+> ⚠️ **Đừng lẫn hai loại "ping":**
+> - **Ping của giao thức** — control frame `0x9`/`0xA`, OkHttp tự gửi tự nhận, code app không thấy.
+> - **Ping của màn debug trong project này** — một **text message bình thường** nội dung
+>   `"PING:<timestamp>"` để đo RTT. Nó là dữ liệu app, không phải control frame.
 
-## A5. Close code — đóng có kỷ luật
+## A7. Đóng kết nối cho tử tế — close code
 
-Đóng đúng chuẩn là **bắt tay 2 chiều**: A gửi frame close → B trả frame close → mới đóng TCP.
-Đóng TCP thẳng mà không gửi close frame là "abnormal closure".
+### Vì sao phải phân biệt lý do đứt
 
-| Code | Nghĩa | Ai sinh ra |
-|---|---|---|
-| `1000` | Normal closure — xong việc | ứng dụng |
-| `1001` | Going away — server tắt / tab đóng | ứng dụng |
-| `1002` | Protocol error | thư viện |
-| `1006` | **Abnormal** — TCP đứt mà không có close frame | **thư viện tự sinh, KHÔNG BAO GIỜ lên dây** |
-| `1011` | Internal server error | server |
-| `3000–3999` | Đăng ký với IANA (framework/thư viện) | — |
-| `4000–4999` | **Private use** — app tự định nghĩa | ứng dụng |
+Client cần trả lời một câu: **có nên nối lại không?**
 
-**`1006` là mã bạn phải hiểu**: nó không tồn tại trên dây, thư viện sinh ra để nói "kết nối chết
-bất thường, tôi không nhận được close frame". Nó luôn có nghĩa **nên retry**.
+- Đứt vì tàu chui vào hầm ⇒ **phải nối lại**.
+- Server đóng vì token của bạn bị thu hồi ⇒ **nối lại là vô ích và có hại**, cứ nối lại vô hạn vào
+  một server đang cố đuổi bạn đi.
 
-Ngược lại, dải **4000–4999** là chỗ app cắm business logic. Project này dùng **`4001` = "token bị
-thu hồi, đừng nối lại nữa"** — xem `CloseReason.isFatal()`. Đây là cách phân biệt
-**lỗi tạm thời (retry)** với **lỗi vĩnh viễn (dừng hẳn)**; không phân biệt thì client sẽ nối lại
-vô hạn vào một server đang cố đuổi nó đi.
+Hai tình huống này nhìn từ tầng TCP là **giống hệt nhau** — kết nối đóng. Cần một tín hiệu ở tầng
+ứng dụng để phân biệt. Đó là **close code**.
 
-## A6. Reconnect: exponential backoff + jitter
-
-Kết nối realtime **chắc chắn sẽ đứt** — đó là giả định thiết kế, không phải trường hợp lỗi.
-
-**Nối lại ngay lập tức là sai**: server vừa restart mà 100k client đập vào cùng lúc thì nó chết
-lần nữa. Đây là **thundering herd**.
-
-Công thức trong `BackoffPolicy`:
+### Đóng đúng chuẩn là bắt tay hai chiều
 
 ```
-ceiling(attempt) = min(cap, base × factor^(attempt−1))     // 500ms, 1s, 2s, 4s… trần 30s
-delay            = random(0, ceiling)                       // FULL JITTER
+A → close frame (code 1000)
+B → close frame (trả lời)      ← B phải trả lời
+    rồi mới thật sự đóng TCP
 ```
 
-- **Exponential**: mỗi lần thất bại chờ gấp đôi — server càng lâu chưa dậy thì càng ít bị đấm.
-- **Cap (trần)**: không có trần thì sau 20 lần thử là chờ 6 ngày. Trần 30s.
-- **Full jitter**: **quan trọng nhất và hay bị bỏ quên**. Không có jitter, cả triệu client mất
-  mạng cùng lúc sẽ nối lại đúng cùng một mili-giây — đường cong tải là các cột nhọn. Random hoá
-  làm nó phẳng ra. AWS gọi biến thể này là "full jitter" và đo được nó tốt hơn "equal jitter".
-- **Reset về 0 khi kết nối THÀNH CÔNG** — không reset thì sau vài giờ chạy, một cú đứt bình
-  thường cũng phải chờ 30s mới nối lại.
+Đóng TCP thẳng mà không gửi close frame gọi là **abnormal closure**. Bên kia không biết vì sao,
+chỉ biết đường dây im bặt.
 
-**Và một tối ưu mà app tốt nào cũng có:** nếu đang chờ backoff 30s mà **Wi-Fi vừa bật lại** thì
-phải nối **NGAY**, không ngồi đợi hết 30s. Đó là lý do tồn tại của `NetworkMonitor`.
+### Bảng mã
 
-## A7. ws:// vs wss:// và chuyện cleartext trên Android
+| Code | Nghĩa | Ai sinh ra | Nên retry? |
+|---|---|---|---|
+| `1000` | Normal — xong việc | ứng dụng | tuỳ |
+| `1001` | Going away — server tắt / tab đóng | ứng dụng | **có** |
+| `1002` | Lỗi giao thức | thư viện | không |
+| `1006` | **Abnormal** — TCP đứt, không có close frame | **thư viện tự bịa ra** | **có** |
+| `1011` | Lỗi nội bộ server | server | có |
+| `3000`–`3999` | Đăng ký với IANA (framework) | — | tuỳ |
+| `4000`–`4999` | **Private use — app tự định nghĩa** | ứng dụng | **tuỳ bạn quy ước** |
+
+**`1006` là mã cần hiểu rõ nhất.** Nó **không bao giờ xuất hiện trên dây** — không ai gửi nó cả.
+Thư viện tự sinh ra để nói với bạn: "kết nối chết mà tôi không nhận được close frame nào". Nghĩa là
+mất mạng, app bị kill, cáp đứt. **Luôn nên retry.**
+
+**Dải `4000`–`4999` là chỗ app cắm business logic.** Project này quy ước:
+
+> **`4001` = "token bị thu hồi, đừng nối lại nữa"**
+
+Xem `CloseReason.isFatal()` ở Phần B. Server route `/policy` đóng bằng mã này để bạn test.
+
+## A8. Nối lại — exponential backoff + jitter
+
+### Xuất phát điểm: kết nối **chắc chắn** sẽ đứt
+
+Đây là giả định thiết kế, không phải trường hợp lỗi hiếm gặp. Điện thoại đi qua hầm, đổi Wi-Fi sang
+4G, server deploy bản mới, NAT dọn bảng. Một app realtime tử tế phải coi việc đứt và nối lại là
+**hoạt động bình thường**.
+
+### Vì sao không nối lại ngay lập tức
+
+Server restart. **100.000 client cùng phát hiện đứt trong cùng một giây, và cùng nối lại ngay.**
+Server vừa bò dậy đã lãnh 100.000 handshake TLS đồng thời và chết lần nữa. Chết rồi thì 100.000
+client lại nối lại. Vòng lặp tử thần.
+
+Hiện tượng này tên là **thundering herd** — đàn trâu giẫm đạp.
+
+### Xây dần lời giải
+
+**Thử 1 — nối lại ngay:** vừa nói ở trên. Sập.
+
+**Thử 2 — chờ cố định 5 giây:** không cứu được gì. Cả 100.000 client cùng phát hiện đứt tại
+`T`, nên cùng nối lại tại `T+5`. Vẫn là một cú đấm, chỉ chậm hơn 5 giây.
+
+**Thử 3 — chờ tăng dần (exponential):**
+```
+lần 1: chờ 500ms
+lần 2: chờ 1s
+lần 3: chờ 2s
+lần 4: chờ 4s   …
+```
+Server càng lâu chưa dậy thì càng ít bị đấm. Tốt hơn nhiều. Nhưng vẫn còn hai lỗ:
+- **Không có trần** ⇒ sau 20 lần thử là chờ 6 ngày. Phải **cap**, project này cap **30 giây**.
+- **Vẫn đồng bộ**: 100.000 client cùng theo một lịch giống hệt nhau ⇒ cùng đấm tại 500ms, rồi cùng
+  tại 1s, rồi cùng tại 2s. Đường cong tải là những cột nhọn.
+
+**Thử 4 — thêm ngẫu nhiên (jitter):** thay vì chờ **đúng** `d`, chờ một số **ngẫu nhiên trong
+`[0, d]`**. Đàn trâu bị rải mỏng ra trên trục thời gian. Đây là biến thể AWS gọi là **full jitter**
+và đo được là tốt hơn các biến thể khác.
+
+Công thức cuối, chính là `BackoffPolicy` trong code:
+
+```
+trần(lần thứ n) = min(30s, 500ms × 2^(n−1))     // 500ms, 1s, 2s, 4s… chặn ở 30s
+thời gian chờ  = random(0, trần)                 // full jitter
+```
+
+### Hai chi tiết dễ quên
+
+**1. Reset về 0 khi nối lại THÀNH CÔNG.** Không reset thì app chạy vài giờ, gặp một cú đứt bình
+thường cũng phải chờ 30 giây — trong khi mạng vẫn ngon lành. Đây là bug im lặng, không crash, không
+log, chỉ làm app "cảm giác chậm".
+
+**2. Cắt ngắn khi mạng vừa quay lại.** Đang chờ backoff 30 giây, người dùng tắt chế độ máy bay —
+**phải nối lại NGAY**, không ngồi đợi hết 30 giây trong khi Wi-Fi đã lên từ lâu. Đây chính là lý do
+tồn tại của `NetworkMonitor` (Phần B, mục B4).
+
+## A9. `ws://` vs `wss://` và chuyện cleartext trên Android
 
 | | Port mặc định | Tầng dưới |
 |---|---|---|
 | `ws://` | 80 | TCP trần |
-| `wss://` | 443 | TCP + TLS |
+| `wss://` | 443 | TCP + **TLS** |
 
-**Luôn dùng `wss://` ở production.** Không chỉ vì mã hoá: proxy trung gian hay "nghịch" traffic
-port 80 và làm hỏng frame WebSocket. Traffic TLS thì proxy không đọc được nên buộc phải để yên —
-tỉ lệ kết nối thành công qua mạng công ty/carrier cao hơn hẳn.
+**Luôn dùng `wss://` ở production** — và lý do quan trọng không kém mã hoá: proxy trung gian hay
+"nghịch" traffic port 80 và làm hỏng frame WebSocket (chính là kịch bản cache poisoning ở A5).
+Traffic TLS thì proxy **không đọc được** nên buộc phải để yên. Tỉ lệ kết nối thành công qua mạng
+công ty/nhà mạng cao hơn hẳn.
 
-**Android**: từ **API 28**, cleartext (HTTP / `ws://` không TLS) bị **chặn mặc định** — OkHttp ném
-`CLEARTEXT communication to <host> not permitted by network security policy`.
+**Trên Android**: từ **API 28**, cleartext (HTTP và `ws://` không TLS) bị **chặn mặc định** — OkHttp
+ném `CLEARTEXT communication to <host> not permitted by network security policy`.
 
-Project này **chỉ dùng `wss://`** nên không khai gì cả. Nếu có ngày cần trỏ vào server node chạy
-local, cách đúng là mở cleartext **chỉ cho debug build** bằng `app/src/debug/AndroidManifest.xml`:
+Project này **chỉ dùng `wss://`** nên không khai gì. Nếu cần trỏ vào server node chạy local, cách
+đúng là mở cleartext **chỉ cho debug build**, bằng `app/src/debug/AndroidManifest.xml`:
 
 ```xml
 <application android:usesCleartextTraffic="true" />
 ```
 
-Đặt ở source set `debug` thì release build **vẫn bị chặn** — đây là điểm hay bị làm sai (nhét
-thẳng vào `src/main` là mở cleartext cho cả bản phát hành).
+Đặt ở source set `debug` thì bản release **vẫn bị chặn**. Đây là chỗ hay làm sai: nhét thẳng vào
+`src/main` là mở cleartext cho cả bản phát hành lên Play Store.
 
-`10.0.2.2` là địa chỉ alias mà emulator dùng để trỏ về `localhost` **của máy host** — trong
-emulator, `127.0.0.1` là chính emulator chứ không phải máy bạn.
+(`10.0.2.2` là địa chỉ alias emulator dùng để trỏ về `localhost` **của máy host** — bên trong
+emulator, `127.0.0.1` là chính emulator chứ không phải máy bạn.)
 
 ---
 
-# PHẦN B — CODE HOẠT ĐỘNG THẾ NÀO
+# PHẦN B — CODE
+
+Phần A nói giao thức. Phần này nói **code trong project xử lý những vấn đề đó ở đâu**.
 
 ## B1. Bản đồ
 
 ```
 socket/
-├── domain/                        ← KHÔNG biết OkHttp/Android là gì. Thuần Kotlin.
+├── domain/                        ← KHÔNG biết OkHttp/Android là gì. Kotlin thuần.
 │   ├── RealtimeRepository.kt        interface + ConnectionState + CloseReason
 │   ├── NetworkMonitor.kt            interface + NetworkStatus
-│   └── BackoffPolicy.kt             công thức backoff (hàm thuần → unit test được)
+│   └── BackoffPolicy.kt             công thức A8 (hàm thuần ⇒ unit test được)
 ├── data/                          ← Chỗ DUY NHẤT biết OkHttp/ConnectivityManager
-│   ├── RealtimeRepositoryImpl.kt    vòng lặp reconnect — nơi mọi thứ khó nằm ở đây
+│   ├── RealtimeRepositoryImpl.kt    vòng lặp reconnect — mọi thứ khó nằm ở đây
 │   └── AndroidNetworkMonitor.kt     ConnectivityManager → Flow
-├── ui/                            ← MVI
-│   ├── SocketContract.kt            State + Intent + Effect + label()
-│   ├── SocketDebugViewModel.kt      reducer
+├── ui/
+│   ├── SocketContract.kt            State + Intent + Effect
+│   ├── SocketDebugViewModel.kt      reducer MVI
 │   └── SocketDebugScreen.kt         Compose
 └── di/SocketGraph.kt              ← repository là singleton theo Application
 ```
 
-**Luật một chiều:** `ui → domain ← data`. Mũi tên **đều chĩa vào domain**. `domain` không import
-gì của framework — kiểm bằng cách nhìn danh sách `import` ở đầu file, không cần tin lời ai.
+**Luật một chiều: `ui → domain ← data`.** Cả hai mũi tên chĩa vào `domain`. Tầng trong cùng
+(`domain`) không biết gì về tầng ngoài.
 
-Đổi OkHttp sang thư viện khác ⇒ chỉ viết lại `data/`, `ui/` không đổi một dòng. Đó là toàn bộ giá
-trị của việc chia tầng; nếu không đạt được điều đó thì chia tầng chỉ là tạo thêm folder.
+Kiểm chứng không cần tin ai: mở file bất kỳ trong `domain/`, nhìn danh sách `import` — không có
+`okhttp3`, không có `android.*`. Nếu có thì ranh giới đã vỡ.
+
+**Được gì:** đổi OkHttp sang thư viện khác ⇒ viết lại `data/`, `ui/` không đổi một dòng. Đó là toàn
+bộ giá trị của việc chia tầng. Nếu không đạt được điều đó thì chia tầng chỉ là tạo thêm folder.
 
 ## B2. Luồng dữ liệu
 
@@ -252,61 +550,68 @@ flowchart LR
     NM[NetworkMonitor] -->|Available / Lost| R
 ```
 
-**Hai dòng ra khỏi repository, không phải một** — đây là quyết định thiết kế then chốt:
+### Vì sao repository phát ra HAI dòng chứ không một
 
 | | Bản chất | Kiểu | Vì sao |
 |---|---|---|---|
-| `connectionState` | **giá trị hiện tại** | `StateFlow` | ai subscribe lúc nào cũng phải đọc được sự thật ⇒ cần replay |
-| `messages` | **sự kiện trôi qua** | `SharedFlow` (không replay) | phát lại tin nhắn cũ mỗi lần vào màn là sai |
+| `connectionState` | **giá trị hiện tại** | `StateFlow` | ai subscribe lúc nào cũng phải đọc được sự thật ⇒ **cần replay** |
+| `messages` | **sự kiện trôi qua** | `SharedFlow` không replay | phát lại tin cũ mỗi lần vào màn là sai |
 
-Bản đầu tiên gộp cả hai vào một `Flow<ConnectionEvent>`. Hậu quả thật: Activity bị destroy hẳn
-(đổi ngôn ngữ hệ thống, process bị kill rồi restore) → ViewModel mới khởi tạo `Disconnected`
-trong khi socket **vẫn đang Connected** → UI nói dối tới khi có event kế tiếp. Chữa bằng
-`replay = 1` thì tin nhắn cũ bị phát lại — sai kiểu khác. **Gộp hai bản chất khác nhau vào một
-kênh thì buộc phải chọn một semantics, và bên còn lại luôn sai.**
+Bản đầu tiên gộp cả hai vào một `Flow<ConnectionEvent>`. Hậu quả thật đã gặp: Activity bị huỷ hẳn
+(đổi ngôn ngữ hệ thống, process bị kill rồi khôi phục) → ViewModel mới khởi tạo `Disconnected`
+trong khi socket **vẫn đang Connected** → UI nói dối cho tới khi có event kế tiếp.
+
+Chữa bằng `replay = 1` thì tin nhắn cũ bị phát lại mỗi lần vào màn — sai kiểu khác.
+
+> **Bài học tổng quát:** gộp hai bản chất khác nhau vào một kênh thì buộc phải chọn một semantics,
+> và bên còn lại **luôn** sai.
 
 ## B3. Trái tim: vòng lặp reconnect
 
-`RealtimeRepositoryImpl.runConnectionLoop()`:
+`RealtimeRepositoryImpl.runConnectionLoop()` — đây là nơi A6, A7, A8 gặp nhau:
 
 ```
 while (còn sống) {
     publish(Connecting)
     reason = connectOnce(url)          ← suspend TỚI KHI kết nối này chết
-    if (reason.isFatal()) {            ← close code 4001, hoặc URL sai
-        publish(Failed); break
+    if (reason.isFatal()) {            ← A7: close code 4001, hoặc URL sai
+        publish(Failed); break         ← dừng hẳn, không nối lại
     }
     n = ++attempt
-    publish(Reconnecting(n, waitMs))
+    publish(Reconnecting(n, waitMs))   ← A8: backoff
     awaitBackoff(waitMs)               ← chờ, NHƯNG tỉnh sớm nếu mạng vừa về
 }
 ```
 
-Điểm hay của cấu trúc này: **reconnect không phải là "xử lý lỗi", nó là vòng lặp bình thường**.
-Kết nối chết chỉ là điều kiện để đi tiếp vòng lặp. Không có `try/catch` rải rác, không có callback
-lồng nhau.
+**Điểm hay của cấu trúc này: reconnect không phải "xử lý lỗi", nó là vòng lặp bình thường.** Kết
+nối chết chỉ là điều kiện để đi tiếp vòng lặp — đúng như tinh thần A8 ("đứt là hoạt động bình
+thường"). Không `try/catch` rải rác, không callback lồng nhau.
 
 ### `connectOnce()` — bắc cầu callback sang coroutine
 
-OkHttp là **callback-based**; vòng lặp trên là **suspend**. Cầu nối là `CompletableDeferred`:
+OkHttp báo sự kiện qua **callback**; vòng lặp trên là **suspend**. Cầu nối là `CompletableDeferred`:
 
 ```kotlin
 val closed = CompletableDeferred<CloseReason>()
+
 val ws = client.newWebSocket(request, object : WebSocketListener() {
     override fun onClosed(...)  { closed.complete(CloseReason.ServerClose(code, reason)) }
     override fun onFailure(...) { closed.complete(CloseReason.NetworkFailure(...)) }
 })
-return try { closed.await() } finally { ws.cancel() }   // suspend tới khi 1 trong 2 callback nổ
+
+return try { closed.await() } finally { ws.cancel() }
 ```
 
-`closed.await()` treo coroutine cho tới khi listener gọi `complete()`. Đúng một dòng thay cho cả
-một máy trạng thái callback.
+`closed.await()` treo coroutine cho tới khi một trong hai callback gọi `complete()`. **Một dòng
+thay cho cả một máy trạng thái callback.**
 
-> Đây là pattern chuẩn để bọc **bất kỳ** callback API nào của Android thành coroutine.
-> Anh em của nó: `suspendCancellableCoroutine` (cho one-shot) và `callbackFlow` (cho dòng sự kiện
-> — chính là thứ `AndroidNetworkMonitor` dùng).
+> Đây là pattern chuẩn để bọc **bất kỳ** callback API nào của Android thành coroutine. Anh em của
+> nó: `suspendCancellableCoroutine` (một lần), `callbackFlow` (dòng sự kiện — chính là thứ
+> `AndroidNetworkMonitor` dùng).
 
-### `awaitBackoff()` — chờ nhưng tỉnh sớm
+### `awaitBackoff()` — chờ, nhưng tỉnh sớm khi mạng về
+
+Đây là hiện thực của chi tiết số 2 ở cuối A8:
 
 ```kotlin
 withTimeoutOrNull(waitMs) {
@@ -316,12 +621,15 @@ withTimeoutOrNull(waitMs) {
 }
 ```
 
-Đọc từ trong ra: "chờ tới khi mạng Available, nhưng tối đa `waitMs`".
+Đọc thành lời: *"chờ tới khi mạng Available, nhưng tối đa `waitMs`"*.
 
-`dropWhile` là chỗ dễ sai nhất. Nếu **ngay lúc này đang có mạng** (server tự đá mình ra chứ không
-phải rớt sóng) thì `first { Available }` sẽ khớp **ngay lập tức** và hàm trả về tức thì ⇒ backoff
-coi như không tồn tại ⇒ reconnect storm. `dropWhile` bỏ qua giá trị hiện tại, buộc phải đi qua
-**đúng chuyển dịch `Lost → Available`** mới tỉnh.
+**`dropWhile` là chỗ dễ sai nhất cả file.** Nếu **ngay lúc này đang có mạng** (server tự đá mình ra
+chứ không phải rớt sóng) thì `first { Available }` khớp **ngay lập tức**, hàm trả về tức thì ⇒
+backoff coi như không tồn tại ⇒ reconnect storm.
+
+`dropWhile` bỏ qua giá trị hiện tại, buộc luồng phải đi qua **đúng chuyển dịch `Lost → Available`**
+mới đánh thức. Nếu đang mất mạng sẵn thì `dropWhile` không bỏ gì cả và ta tỉnh đúng khoảnh khắc
+mạng quay lại — chính xác là hành vi mong muốn.
 
 ## B4. `AndroidNetworkMonitor` — cái bẫy `Flow` lạnh
 
@@ -332,44 +640,46 @@ callbackFlow {
         override fun onLost(n: Network)      { trySend(currentStatus()) }   // ← không gửi Lost mù
     }
     cm.registerDefaultNetworkCallback(callback)
-    awaitClose { cm.unregisterNetworkCallback(callback) }   // gỡ callback, không leak
+    awaitClose { cm.unregisterNetworkCallback(callback) }    // gỡ callback, không leak
 }
     .distinctUntilChanged()
-    .stateIn(scope, SharingStarted.Eagerly, currentStatus())   // ← BẮT BUỘC
+    .stateIn(scope, SharingStarted.Eagerly, currentStatus())  // ← BẮT BUỘC Eagerly
 ```
 
-**Hai bug thật đã sửa ở đây, cả hai đều đáng kể ra khi phỏng vấn:**
+**Hai bug thật đã sửa ở đây:**
 
 **1. `onLost` không được gửi thẳng `Lost`.** Khi máy chuyển **Wi-Fi → 4G**, hệ thống bắn
-`onAvailable(mạng mới)` **TRƯỚC** rồi mới `onLost(mạng cũ)`. Gửi `Lost` mù sẽ kẹt trạng thái ở
+`onAvailable(mạng mới)` **TRƯỚC**, rồi mới `onLost(mạng cũ)`. Gửi `Lost` mù sẽ kẹt trạng thái ở
 "mất mạng" trong khi thực tế đang online. Phải **hỏi lại hệ thống** trạng thái hiện tại.
 
-**2. `stateIn(Eagerly)` chứ không phải Flow lạnh, cũng không phải `WhileSubscribed`.**
+**2. Bắt buộc `stateIn(Eagerly)`, không được để Flow lạnh, cũng không được `WhileSubscribed`.**
 `registerDefaultNetworkCallback` **luôn bắn `onAvailable` ngay tại thời điểm đăng ký** cho mạng
-đang có (hành vi có tài liệu). Nếu trả `Flow` lạnh thì mỗi lần `awaitBackoff` collect là một
-callback mới được đăng ký, và nó lập tức báo "Available" ⇒ điều kiện "mạng vừa quay lại" **luôn
-đúng** ⇒ backoff bị cắt về ~0ms ⇒ reconnect storm. `WhileSubscribed` tái hiện y hệt bug đó vì
-repository subscribe/unsubscribe liên tục giữa các lần chờ. **Bắt buộc `Eagerly`** — một callback
-duy nhất cho cả vòng đời app.
+đang có (hành vi có tài liệu). Với `Flow` lạnh, mỗi lần `awaitBackoff` collect là một callback mới
+được đăng ký, và nó lập tức báo "Available" ⇒ điều kiện "mạng vừa quay lại" **luôn đúng** ⇒ backoff
+bị cắt về ~0ms ⇒ reconnect storm. `WhileSubscribed` tái hiện y hệt bug đó, vì repository
+subscribe/unsubscribe liên tục giữa các lần chờ. `Eagerly` = một callback duy nhất cho cả vòng đời app.
 
-Và `currentStatus()` kiểm `NET_CAPABILITY_VALIDATED` (API 23) chứ không chỉ `NET_CAPABILITY_INTERNET`:
-`VALIDATED` nghĩa là hệ thống đã **thật sự thử ra Internet và thành công** — loại được Wi-Fi
-captive portal (bắt được sóng quán cà phê nhưng chưa đăng nhập), thứ mà `INTERNET` không phân biệt nổi.
+**Và:** `currentStatus()` kiểm `NET_CAPABILITY_VALIDATED` (API 23) chứ không chỉ
+`NET_CAPABILITY_INTERNET`. `VALIDATED` nghĩa là hệ thống **đã thật sự thử ra Internet và thành
+công** — loại được Wi-Fi captive portal (bắt được sóng quán cà phê nhưng chưa đăng nhập), thứ mà
+`INTERNET` không phân biệt nổi.
 
-## B5. Ba cơ chế chống race — phần bị hỏi sâu nhất
+## B5. Chống race — phần khó nhất
 
-Callback của OkHttp chạy trên **thread của OkHttp**, vòng lặp chạy trên `Dispatchers.Default`,
-người dùng bấm nút trên **main thread**. Ba thread cùng đụng vào một mớ state.
+Ba thread cùng đụng vào một mớ state:
+- **Thread OkHttp** — mọi callback (`onOpen`, `onMessage`, `onFailure`…)
+- **`Dispatchers.Default`** — vòng lặp reconnect
+- **Main thread** — người dùng bấm nút
 
 ### 1. `generation` — con dấu thế hệ
 
-Mỗi `connect()`/`disconnect()` tăng `generation` lên 1. Mọi thứ phát ra ngoài đều mang theo con
-dấu của vòng lặp sinh ra nó; dấu cũ thì **vứt**.
+Mỗi `connect()`/`disconnect()` tăng `generation` lên 1. Mọi thứ phát ra ngoài đều mang con dấu của
+vòng lặp sinh ra nó; **dấu cũ thì vứt**.
 
 Không có nó: bấm "Ngắt" đúng lúc `onOpen` của vòng lặp cũ vừa chạy trên thread OkHttp ⇒ UI kẹt ở
 "đã kết nối" dù kết nối đã bị huỷ.
 
-### 2. `lifecycleLock` — vì kiểm-rồi-ghi là **hai** lệnh
+### 2. `lifecycleLock` — vì "kiểm rồi ghi" là **hai** lệnh
 
 ```kotlin
 private fun publish(gen: Long, state: ConnectionState) {
@@ -379,28 +689,32 @@ private fun publish(gen: Long, state: ConnectionState) {
 }
 ```
 
-Vì sao không chỉ `if (...) value = state`: đó là hai lệnh rời rạc. Thread A (vòng lặp cũ) đọc
-`generation` thấy khớp → bị OS cắt ngang → thread B chạy `disconnect()` (tăng generation, ghi
-`Disconnected`) → A tỉnh lại và ghi `Connected` **đè lên**. Đúng con bug mà con dấu thế hệ ra đời
-để diệt, chỉ dịch xuống nhỏ hơn một tầng. Bọc cặp (đọc, ghi) vào cùng lock thì cửa sổ đó biến mất.
+Vì sao không chỉ `if (...) value = state`? Vì đó là hai lệnh rời rạc:
 
-Hàm `claimSocket()` dùng chung lock này, vì lý do y hệt.
+```
+Thread A (vòng lặp cũ):  đọc generation → thấy khớp → ... bị OS cắt ngang ...
+Thread B (disconnect):                                  tăng generation, ghi Disconnected
+Thread A:                                                                   ghi Connected ĐÈ LÊN
+```
 
-**Quy tắc bất di bất dịch của lock này: KHÔNG gọi vào OkHttp khi đang giữ nó.** `ws.cancel()` có
-thể gọi `onFailure` ngay trên thread hiện tại; nếu listener chạm vào `publish()` thì tự deadlock.
-Vì vậy trong `disconnect()`, `ws.cancel()` được đẩy ra **ngoài** khối `synchronized`.
+Đúng con bug mà con dấu thế hệ sinh ra để diệt, chỉ dịch xuống nhỏ hơn một tầng. Bọc cặp (đọc, ghi)
+vào cùng một lock thì cửa sổ đó biến mất. Hàm `claimSocket()` dùng chung lock này vì lý do y hệt.
 
-### 3. `compareAndSet` chứ không `set(null)` mù
+> **Quy tắc bất di bất dịch của lock này: KHÔNG gọi vào OkHttp khi đang giữ nó.** `ws.cancel()` có
+> thể gọi `onFailure` ngay trên thread hiện tại; nếu listener chạm vào `publish()` thì tự deadlock.
+> Vì vậy trong `disconnect()`, `ws.cancel()` bị đẩy ra **ngoài** khối `synchronized`.
+
+### 3. `compareAndSet`, không bao giờ `set(null)` mù
 
 `connect()` huỷ vòng lặp cũ rồi `launch` vòng lặp mới **NGAY**. Nhưng `cancel()` là **bất đồng
-bộ** — khối `finally` dọn dẹp của vòng lặp cũ hoàn toàn có thể chạy **SAU** khi vòng lặp mới đã
-gán socket của nó. `set(null)` mù khi đó xoá mất socket đang sống ⇒ `send()` trả `false` vĩnh viễn.
+bộ** — khối `finally` dọn dẹp của vòng lặp cũ hoàn toàn có thể chạy **SAU** khi vòng lặp mới đã gán
+socket của nó. `set(null)` mù khi đó xoá mất socket đang sống ⇒ `send()` trả `false` vĩnh viễn.
 `compareAndSet(ws, null)` chỉ xoá **đúng socket của mình**.
 
 Chiều ngược lại cũng vậy: `onOpen` của vòng lặp cũ có thể nổ **muộn** và ghi đè socket đang sống
-bằng một socket sắp bị cancel ⇒ dùng `claimSocket(gen, ...)`, không `set()` mù.
+bằng một socket sắp bị huỷ ⇒ dùng `claimSocket(gen, ...)` chứ không `set()`.
 
-### Và: `currentSocket` vs `openSocket` — hai biến, không phải một
+### 4. `currentSocket` và `openSocket` — hai biến, không phải một
 
 | | Gán khi nào | Dùng làm gì |
 |---|---|---|
@@ -411,12 +725,12 @@ bằng một socket sắp bị cancel ⇒ dùng `claimSocket(gen, ...)`, không 
 message vào hàng đợi chờ handshake xong. Nếu `send()` chỉ kiểm "socket != null" thì lúc đang
 CONNECTING vẫn trả `true`, sai với hợp đồng "trả false nếu chưa kết nối" mà UI đang tin.
 
-### Bonus: `attempt` là `AtomicInteger`, không phải `var`
+### 5. `attempt` là `AtomicInteger`, không phải `var`
 
 Nó được **ghi trên thread OkHttp** (trong `onOpen`, để reset về 0) và **đọc trên dispatcher của
-vòng lặp**. Với `var` thường, JMM không đảm bảo thread đọc thấy giá trị thread kia vừa ghi ⇒
-backoff có thể **không bao giờ reset** dù kết nối đã thành công. Bug này không crash, không log,
-chỉ làm app chậm nối lại — loại tệ nhất.
+vòng lặp**. Với `var` thường, Java Memory Model không đảm bảo thread đọc thấy giá trị thread kia
+vừa ghi ⇒ backoff có thể **không bao giờ reset** dù đã kết nối thành công. Bug không crash, không
+log, chỉ làm app chậm nối lại — loại tệ nhất.
 
 ## B6. Ai sở hữu vòng đời kết nối
 
@@ -426,18 +740,18 @@ chỉ làm app chậm nối lại — loại tệ nhất.
 **chỉ dừng vòng ping đo RTT, KHÔNG gọi `disconnect()`**.
 
 Bản trước gọi `disconnect()` trong `onCleared` và nó **tự phủ định lý do tồn tại của
-`SocketGraph`**: dựng singleton để kết nối sống lâu hơn màn hình, rồi lại giết nó ngay khi màn
-hình chết. Khi có hai màn dùng chung một kết nối thì hỏng thật: pop màn A ⇒ `onCleared` ⇒
-`disconnect` ⇒ màn B đứt.
+`SocketGraph`**: dựng singleton để kết nối sống lâu hơn màn hình, rồi giết nó ngay khi màn hình
+chết. Khi có hai màn dùng chung một kết nối thì hỏng thật: pop màn A ⇒ `onCleared` ⇒ `disconnect` ⇒
+màn B đứt kết nối.
 
-Đã cân nhắc và **loại** phương án refcount (`SharingStarted.WhileSubscribed`): URL do người dùng
-gõ ở runtime, nên khi subscriber cuối rời đi rồi có người mới vào, refcount **không biết phải nối
-lại vào URL nào**. "Nên kết nối tới đâu" là input của người dùng, không suy ra được từ số lượng
-người đang xem.
+**Đã cân nhắc và loại phương án refcount** (`SharingStarted.WhileSubscribed`): URL do người dùng gõ
+ở runtime, nên khi subscriber cuối rời đi rồi có người mới vào, refcount **không biết phải nối lại
+vào URL nào**. "Nên kết nối tới đâu" là input của người dùng, không suy ra được từ số lượng người
+đang xem.
 
-**Cái giá phải trả (đang chấp nhận):** rời màn hình mà chưa bấm "Ngắt" thì vòng reconnect vẫn chạy
-nền tới khi process chết — xấu nhất 1 lần thử mỗi 30s do backoff có trần. App thật phải buộc kết
-nối vào **process foreground** (`ProcessLifecycleOwner`) hoặc vào phiên đăng nhập.
+**Cái giá đang chấp nhận:** rời màn hình mà chưa bấm "Ngắt" thì vòng reconnect vẫn chạy nền tới khi
+process chết — xấu nhất một lần thử mỗi 30 giây (do backoff có trần). App thật phải buộc kết nối
+vào **process foreground** (`ProcessLifecycleOwner`) hoặc vào phiên đăng nhập.
 
 ## B7. Tầng UI — MVI
 
@@ -450,11 +764,11 @@ tin nhắn đến ────────┘                    ↑ HÀM THUẦ
 - **`onIntent` là cửa vào DUY NHẤT.** View không gọi thẳng repository.
 - **`reduce` là hàm thuần** — chỗ duy nhất tạo state mới. Không I/O, không thời gian, không random
   ⇒ test được mà không cần socket, không cần Robolectric.
-- **`Effect` đi qua `Channel`, không nằm trong State.** Toast mà để trong State thì mỗi lần
-  recompose / xoay màn hình nó lại hiện lại.
+- **`Effect` đi qua `Channel`, không nằm trong State.** Toast để trong State thì mỗi lần recompose
+  hoặc xoay màn hình nó lại hiện lại.
 - **URL cũng nằm trong State** — View không giữ state riêng, kể cả text field.
 
-### Đo RTT: mốc thời gian nằm TRONG payload
+### Đo RTT: nhét mốc thời gian vào chính payload
 
 ```kotlin
 send("PING:${SystemClock.elapsedRealtime()}")
@@ -462,83 +776,79 @@ send("PING:${SystemClock.elapsedRealtime()}")
 val rtt = SystemClock.elapsedRealtime() - text.removePrefix("PING:").toLong()
 ```
 
-Hai chi tiết:
-
 **1. `elapsedRealtime()` chứ không `currentTimeMillis()`.** `elapsedRealtime` đếm từ lúc boot và
-**đơn điệu tăng**; `currentTimeMillis` là wall-clock, sẽ **nhảy** khi NTP chỉnh giờ hoặc người
-dùng đổi múi giờ giữa lúc đo ⇒ RTT ra số vô nghĩa, có thể âm. **Đo khoảng thời gian thì luôn dùng
+**đơn điệu tăng**. `currentTimeMillis` là giờ treo tường, sẽ **nhảy** khi NTP chỉnh giờ hoặc người
+dùng đổi múi giờ giữa lúc đo ⇒ RTT ra số vô nghĩa, thậm chí âm. **Đo khoảng thời gian thì luôn dùng
 đồng hồ đơn điệu.**
 
-**2. Nhét mốc vào chính payload, không lưu vào biến.** Bản cũ lưu `lastPingSentAt` và bị mọi ping
-ghi đè: khi có 2 ping bay đồng thời (route `/slow` trễ 2s, hoặc bấm Ping tay xen với ping tự động)
-thì pong của ping **thứ nhất** bị trừ theo mốc của ping **thứ hai** ⇒ số vô nghĩa. Đây cũng là
-cách RTCP (WebRTC) làm: timestamp đi kèm gói, không giữ ở ngoài.
+**2. Mốc nằm trong payload, không lưu vào biến.** Bản cũ lưu `lastPingSentAt` và bị mọi ping ghi
+đè: khi có hai ping bay đồng thời (route `/slow` trễ 2s, hoặc bấm Ping tay xen với ping tự động) thì
+pong của ping **thứ nhất** bị trừ theo mốc của ping **thứ hai** ⇒ số vô nghĩa. Đây cũng là cách
+RTCP (WebRTC) làm: timestamp đi kèm gói, không giữ bên ngoài.
 
 ## B8. Đọc code theo 5 kịch bản
 
 | Kịch bản | Đường đi trong code |
 |---|---|
 | **Kết nối thành công** | `connect()` → gen++ → `runConnectionLoop` → `publish(Connecting)` → `connectOnce` → OkHttp `onOpen` → `claimSocket(openSocket)` + `attempt.set(0)` + `publish(Connected)` → ViewModel bật ping loop |
-| **Server đóng bình thường** | `onClosing` → trả close frame → `onClosed` → `closed.complete(ServerClose(1000))` → `isFatal()` = false → `attempt=1` → `publish(Reconnecting)` → `awaitBackoff` → lặp lại |
+| **Server đóng bình thường** | `onClosing` → trả close frame → `onClosed` → `closed.complete(ServerClose(1000))` → `isFatal()` = false → `attempt = 1` → `publish(Reconnecting)` → `awaitBackoff` → lặp lại |
 | **Server đuổi (route `/policy`, code 4001)** | `onClosed(4001)` → `isFatal()` = **true** → `publish(Failed)` → **`break`**, dừng hẳn |
-| **Bật máy bay (half-open)** | im lặng ~20s → OkHttp không nhận pong → `onFailure(SocketTimeoutException)` → `NetworkFailure` → retry. Song song: `NetworkMonitor` phát `Lost` |
-| **Tắt máy bay giữa lúc chờ backoff 30s** | `NetworkMonitor` phát `Available` → `awaitBackoff` đang treo ở `dropWhile→first` **tỉnh ngay** → `withTimeoutOrNull` chưa hết giờ đã trả về → nối lại **NGAY**, không đợi hết 30s |
+| **Bật chế độ máy bay (half-open, A6)** | im lặng ~20s → OkHttp không nhận pong → `onFailure(SocketTimeoutException)` → `NetworkFailure` → retry. Song song: `NetworkMonitor` phát `Lost` |
+| **Tắt máy bay giữa lúc chờ backoff 30s** | `NetworkMonitor` phát `Available` → `awaitBackoff` đang treo ở `dropWhile→first` **tỉnh ngay** → `withTimeoutOrNull` chưa hết giờ đã trả về → nối lại **NGAY** |
 
-## B9. Server mock — cách test từng cơ chế
+## B9. Server mock — test từng cơ chế
 
-`server/server.js`, deploy `wss://realtime-ws-lab.onrender.com`:
+`server/server.js`, deploy tại `wss://realtime-ws-lab.onrender.com`:
 
-| Route | Hành vi | Dùng để test |
+| Route | Hành vi | Test cái gì |
 |---|---|---|
 | `/echo` | trả nguyên văn | happy path, đo RTT |
-| `/slow` | trả sau 2s | RTT cao, 2 ping bay đồng thời |
+| `/slow` | trả sau 2s | RTT cao, hai ping bay đồng thời |
 | `/drop` | ngắt ngẫu nhiên | chuỗi backoff + jitter, reset khi nối lại được |
 | `/policy` | đóng với code **4001** | `isFatal()` → dừng hẳn, không retry |
 
 Ghi số đo vào bảng cuối `server/README.md`. **Chưa đo thì để `chưa đo`, không điền số bịa.**
 
----
+## B10. Việc còn nợ
 
-## B10. Việc còn nợ (đã phân tích, chưa làm)
-
-- **Tách module `:core-network`** — hiện `domain` không import framework là do *kỷ luật package*,
-  compiler không chặn. Tách module thì `build.gradle.kts` của domain không khai OkHttp ⇒ sai là
-  không compile. Đây là câu trả lời mạnh cho "làm sao bạn đảm bảo domain sạch?".
+- **Tách module `:core-network`** — hiện `domain` sạch là nhờ *kỷ luật package*, compiler không
+  chặn. Tách module thì `build.gradle.kts` của domain không khai OkHttp ⇒ import sai là không
+  compile. Đây mới là câu trả lời mạnh cho "làm sao bạn đảm bảo domain sạch?".
 - **Test cho vòng lặp reconnect** — cần `turbine` + `kotlinx-coroutines-test` + `mockwebserver`
   (MockWebServer hỗ trợ WebSocket sẵn) + một `FakeNetworkMonitor`. Hiện chỉ có `BackoffPolicyTest`.
-  Cũng chưa có test cho `reduce` — mà nó là hàm thuần, rẻ nhất để test.
+  Cũng chưa có test cho `reduce`, mà nó là hàm thuần — rẻ nhất để test.
 - **Dời logic RTT xuống tầng data** — `"PING:"` là format wire message, không phải việc của UI.
 - **`SocketGraph` → Hilt `@Singleton`** (hiện là service locator: static, không reset được giữa test).
 - **Hoist ViewModel ra khỏi `SocketDebugScreen`** (nhận `state` + `onIntent`) để `@Preview` được.
 - **`log: List<String>`** — `(s.log + line).takeLast(100)` cấp phát 2 list mỗi dòng log. Vô hại ở
-  10s/ping, nhưng là O(n) mỗi message khi throughput cao.
+  10s/ping, nhưng O(n) mỗi message khi throughput cao.
 
 ---
 
-## Phụ lục — câu hỏi hay gặp, trả lời ngắn
+# Phụ lục — tự kiểm tra
 
-**WebSocket khác long-polling ở đâu?** Long-polling mỗi tin nhắn là một vòng TCP/TLS mới và chỉ
-server→client mới có ý nghĩa; WebSocket là một TCP duy nhất, hai chiều, overhead 2–14 byte/frame.
+Trả lời được hết là hiểu bài. Số trong ngoặc là mục để quay lại đọc.
 
-**Vì sao handshake phải qua HTTP?** Để đi xuyên proxy/firewall/LB sẵn có trên port 80/443.
-
-**Vì sao client bắt buộc mask frame?** Chống cache poisoning ở proxy trung gian, không phải bảo mật.
-
-**Half-open là gì, phát hiện thế nào?** Một đầu chết mà đầu kia không biết, vì TCP không gửi gì khi
-im lặng và keepalive mặc định là 2 tiếng. Phát hiện bằng ping/pong tầng WebSocket (frame 0x9/0xA),
-chu kỳ 20–30s.
-
-**Vì sao backoff phải có jitter?** Chống thundering herd — cả vùng mất mạng rồi có lại cùng lúc sẽ
-reconnect đúng cùng một mili-giây và đấm sập gateway.
-
-**1006 nghĩa là gì?** Abnormal closure — thư viện tự sinh khi TCP đứt mà không nhận được close
-frame. Không bao giờ xuất hiện trên dây. Luôn nên retry.
-
-**Khi nào KHÔNG được retry?** Khi server đóng bằng close code mang nghĩa "đừng nối lại" (project
-này dùng 4001, dải private-use 4000–4999), hoặc URL không parse được.
-
-**Ping của WebSocket và ping đo RTT của bạn khác gì nhau?** Cái đầu là control frame 0x9/0xA do
-OkHttp tự lo, app không thấy. Cái sau là text message thường có timestamp trong payload.
-
-**Kết nối realtime nên thuộc vòng đời nào?** Không thuộc màn hình. Thuộc process/phiên đăng nhập —
-nếu không, pop một màn là các màn khác đứt kết nối theo.
+1. Vì sao HTTP không làm được chat? (A1)
+2. Long polling khác short polling chỗ nào, và vì sao vẫn chưa đủ? (A2)
+3. Full-duplex nghĩa là gì? (A3)
+4. Vì sao handshake WebSocket phải giả dạng HTTP request? (A4)
+5. `101 Switching Protocols` nghĩa là gì? (A4)
+6. `Sec-WebSocket-Key` để làm gì — có phải bảo mật không? (A4)
+7. **TCP đã đảm bảo đúng thứ tự rồi, vậy vì sao còn cần frame?** (A5)
+8. `FIN = 0` nghĩa là gì, dùng khi nào? (A5)
+9. Vì sao client bắt buộc mask mà server thì cấm? (A5)
+10. Half-open là gì? Vì sao TCP không tự phát hiện? (A6)
+11. NAT mapping liên quan gì tới việc phải ping định kỳ? (A6)
+12. Ping của giao thức khác ping đo RTT của app thế nào? (A6)
+13. `1006` nghĩa là gì, vì sao nó không bao giờ xuất hiện trên dây? (A7)
+14. Khi nào **không** được nối lại? (A7)
+15. Thundering herd là gì? Vì sao chờ cố định 5 giây không cứu được? (A8)
+16. Vì sao backoff phải có trần **và** phải reset? (A8)
+17. Vì sao `wss://` chui qua proxy tốt hơn `ws://`? (A9)
+18. Vì sao repository phát hai dòng thay vì một? (B2)
+19. `dropWhile` trong `awaitBackoff` bỏ đi thì hỏng chuyện gì? (B3)
+20. Vì sao `AndroidNetworkMonitor` bắt buộc `Eagerly`? (B4)
+21. `if (gen == generation.get()) value = state` sai ở đâu? (B5)
+22. Vì sao phải có **hai** biến `currentSocket` và `openSocket`? (B5)
+23. Kết nối realtime nên thuộc vòng đời nào, vì sao? (B6)
