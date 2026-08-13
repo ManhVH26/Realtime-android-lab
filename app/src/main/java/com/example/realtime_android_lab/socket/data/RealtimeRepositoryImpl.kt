@@ -52,7 +52,7 @@ import java.util.concurrent.atomic.AtomicReference
  *    vệ [loopJob]. Xem [publish] để biết vì sao chỉ `if (gen == generation.get())` là chưa đủ.
  *
  * Kết nối stateful, sống lâu ⇒ lớp này phải là singleton theo Application, xem
- * [com.example.realtime_android_lab.socket.di.SocketGraph].
+ * `socketModule` (khai `single`, xem socket/di/SocketModule.kt).
  */
 class RealtimeRepositoryImpl(
     private val backoff: BackoffPolicy,

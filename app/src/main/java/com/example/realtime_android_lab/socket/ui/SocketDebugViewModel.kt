@@ -1,12 +1,8 @@
 package com.example.realtime_android_lab.socket.ui
 
-import android.content.Context
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.initializer
-import androidx.lifecycle.viewmodel.viewModelFactory
-import com.example.realtime_android_lab.socket.di.SocketGraph
 import com.example.realtime_android_lab.socket.domain.ConnectionState
 import com.example.realtime_android_lab.socket.domain.RealtimeRepository
 import kotlinx.coroutines.Job
@@ -192,7 +188,8 @@ class SocketDebugViewModel(
     /**
      * CHỈ dừng vòng ping — KHÔNG ngắt kết nối.
      *
-     * Bản trước gọi `disconnect()` ở đây, và nó tự phủ định lý do tồn tại của [SocketGraph]:
+     * Bản trước gọi `disconnect()` ở đây, và nó tự phủ định lý do khai repository là `single`
+     * trong `socketModule`:
      * dựng repository thành singleton theo Application để kết nối sống lâu hơn màn hình, rồi
      * lại giết nó ngay khi màn hình chết. Khi có HAI màn dùng chung MỘT kết nối thì hỏng
      * thật: pop màn A ⇒ onCleared ⇒ disconnect ⇒ màn B đứt kết nối.
@@ -218,15 +215,9 @@ class SocketDebugViewModel(
         /** Tiền tố đánh dấu message dùng để đo RTT (server route /echo trả nguyên văn). */
         private const val PING_PREFIX = "PING:"
 
-        /**
-         * DI thủ công (lab không dùng Hilt).
-         *
-         * Repository lấy từ [SocketGraph] — singleton theo Application. Trước đây factory này
-         * TỰ dựng repository, nghĩa là kết nối realtime có vòng đời của màn hình: sai bản
-         * chất, và rò rỉ OkHttpClient + NetworkCallback qua mỗi lần Activity dựng lại.
-         */
-        fun factory(context: Context) = viewModelFactory {
-            initializer { SocketDebugViewModel(SocketGraph.repository(context)) }
-        }
+        // Không còn `factory(context)`: việc dựng ViewModel đã chuyển sang Koin
+        // (`viewModelOf(::SocketDebugViewModel)` trong socketModule). Nhờ vậy class này không
+        // còn biết gì về Context — nó chỉ nhận đúng thứ nó cần qua constructor, và test có thể
+        // `new` nó thẳng với một RealtimeRepository giả, không cần Koin lẫn Android.
     }
 }

@@ -29,7 +29,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
+import org.koin.compose.viewmodel.koinViewModel
 
 /**
  * BÀI 1 — MVI View. Chỉ làm 2 việc:
@@ -40,11 +40,13 @@ import androidx.lifecycle.viewmodel.compose.viewModel
  */
 @Composable
 fun SocketDebugScreen() {
-    val context = LocalContext.current
-    val viewModel: SocketDebugViewModel = viewModel(
-        factory = SocketDebugViewModel.factory(context),
-    )
+    // koinViewModel() lấy ViewModel từ container Koin và vẫn gắn đúng ViewModelStoreOwner hiện
+    // tại (Activity ở đây) — nghĩa là vẫn sống qua xoay màn hình như `viewModel()` thường.
+    val viewModel: SocketDebugViewModel = koinViewModel()
     val state by viewModel.state.collectAsStateWithLifecycle()
+
+    // Context giờ CHỈ còn để hiện Toast, không còn dùng để dựng ViewModel nữa.
+    val context = LocalContext.current
 
     // Effect một lần: thu bằng LaunchedEffect, hiện Toast. Không đưa vào state.
     LaunchedEffect(Unit) {

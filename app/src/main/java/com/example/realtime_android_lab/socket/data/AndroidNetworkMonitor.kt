@@ -24,7 +24,7 @@ import kotlinx.coroutines.flow.stateIn
  *
  * [scope] quyết định vòng đời của callback: huỷ scope ⇒ `awaitClose` chạy ⇒ callback được gỡ.
  * Lớp này phải là SINGLETON theo Application — xem
- * [com.example.realtime_android_lab.socket.di.SocketGraph].
+ * `socketModule` (khai `single`, xem socket/di/SocketModule.kt).
  */
 class AndroidNetworkMonitor(
     context: Context,

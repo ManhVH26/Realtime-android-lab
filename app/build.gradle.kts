@@ -54,7 +54,17 @@ dependencies {
     // Toàn bộ Bài 1 sống bằng coroutines/Flow — không được để nó phụ thuộc may rủi vào
     // cây phụ thuộc của thư viện khác.
     implementation(libs.kotlinx.coroutines.android)
+
+    // Koin: DI. koin-android = DSL + startKoin + viewModel{}; koin-androidx-compose = koinViewModel().
+    implementation(platform(libs.koin.bom))
+    implementation(libs.koin.android)
+    implementation(libs.koin.androidx.compose)
+
     testImplementation(libs.junit)
+    // Koin phân giải lúc CHẠY, không lúc biên dịch ⇒ binding thiếu = crash chứ không phải lỗi build.
+    // koin-test cho phép kiểm graph trong unit test, biến lỗi runtime thành lỗi test.
+    testImplementation(platform(libs.koin.bom))
+    testImplementation(libs.koin.test)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
