@@ -26,9 +26,33 @@ thì phải đợi client hỏi.
 > Ví von: HTTP giống bạn nhắn tin cho tổng đài. Bạn hỏi thì họ đáp. Họ **không có số của bạn**,
 > nên có tin gì hay ho cũng đành ngồi im đợi bạn hỏi lại.
 
-Đây không phải lỗi thiết kế — HTTP sinh ra năm 1991 để tải trang web tĩnh, việc đó thì
-request/response là đủ và tối ưu. Nhưng chat, thông báo, giá cổ phiếu, vị trí tài xế, cuộc gọi —
-tất cả đều cần **server nói trước**.
+Đây không phải lỗi thiết kế. HTTP sinh ra năm 1991 để tải trang web, và với việc đó thì
+request/response vừa đủ vừa tối ưu: bạn muốn xem trang nào thì hỏi trang đó.
+
+### "Server nói trước" nghĩa là gì
+
+Có **hai loại dữ liệu** hoàn toàn khác nhau, và chỉ một loại cần WebSocket.
+
+**Loại 1 — client tự biết khi nào mình cần.** Bạn mở app, muốn xem danh sách sản phẩm ⇒ gọi
+`GET /products`. Dữ liệu đó đã nằm sẵn trên server từ hôm qua, chờ ai hỏi thì đưa. Bạn muốn xem
+lúc nào thì hỏi lúc đó. **HTTP quá đủ, đừng động vào.**
+
+**Loại 2 — dữ liệu sinh ra ở chỗ khác, vào lúc không ai đoán trước được.** Client không có bất kỳ
+manh mối nào để biết "à, đúng lúc này thì nên hỏi". Đây mới là loại cần server nói trước:
+
+| Tình huống | Dữ liệu mới sinh ra ở đâu, lúc nào | Vì sao client không tự hỏi được |
+|---|---|---|
+| **Chat** | B gõ xong tin, bấm gửi, lúc **14:03:27** | máy A lấy đâu ra thông tin để biết 14:03:27 là lúc đáng hỏi? |
+| **Thông báo đẩy** | server quyết định bắn khuyến mãi | thời điểm hoàn toàn do server chọn |
+| **Giá cổ phiếu** | sàn khớp lệnh, vài lần **mỗi giây** | hỏi 1 lần/giây vẫn trễ, mà vẫn tốn vô ích |
+| **Vị trí tài xế** | điện thoại **tài xế** bắn GPS lên mỗi 3 giây | dữ liệu sinh ở **thiết bị khác**, app khách chỉ ngồi xem |
+| **Cuộc gọi đến** | người kia bấm gọi lúc **20:15** | máy bạn phải reo **ngay**, không phải reo ở lần hỏi kế tiếp |
+
+Điểm chung của cả năm: **người tạo ra dữ liệu không phải bạn, và lúc họ tạo ra thì bạn không đoán
+được.**
+
+Mà HTTP thì bắt buộc client phải hỏi trước. Vậy khi không đoán được lúc nào đáng hỏi, chỉ còn một
+cách: **đoán mò và hỏi liên tục.** Đó chính là mục A2.
 
 ## A2. Ba cách chống chế (và vì sao chúng không đủ)
 
@@ -512,19 +536,23 @@ Phần A nói giao thức. Phần này nói **code trong project xử lý nhữn
 ## B1. Bản đồ
 
 ```
-socket/
-├── domain/                        ← KHÔNG biết OkHttp/Android là gì. Kotlin thuần.
-│   ├── RealtimeRepository.kt        interface + ConnectionState + CloseReason
-│   ├── NetworkMonitor.kt            interface + NetworkStatus
-│   └── BackoffPolicy.kt             công thức A8 (hàm thuần ⇒ unit test được)
-├── data/                          ← Chỗ DUY NHẤT biết OkHttp/ConnectivityManager
-│   ├── RealtimeRepositoryImpl.kt    vòng lặp reconnect — mọi thứ khó nằm ở đây
-│   └── AndroidNetworkMonitor.kt     ConnectivityManager → Flow
-├── ui/
-│   ├── SocketContract.kt            State + Intent + Effect
-│   ├── SocketDebugViewModel.kt      reducer MVI
-│   └── SocketDebugScreen.kt         Compose
-└── di/SocketGraph.kt              ← repository là singleton theo Application
+app/src/main/java/com/example/realtime_android_lab/
+├── RealtimeLabApp.kt              ← startKoin. Phải khai android:name trong manifest.
+├── MainActivity.kt                  vào thẳng màn WebSocket, không menu
+└── socket/
+    ├── SocketExercise.kt          ← bài tập của tôi: chỉ TODO, không lời giải
+    ├── di/SocketModule.kt         ← khai báo Koin: cái gì là singleton, bind vào interface nào
+    ├── domain/                    ← KHÔNG biết OkHttp/Android là gì. Kotlin thuần.
+    │   ├── RealtimeRepository.kt     interface + ConnectionState + CloseReason
+    │   ├── NetworkMonitor.kt         interface + NetworkStatus
+    │   └── BackoffPolicy.kt          công thức A8 (hàm thuần ⇒ unit test được)
+    ├── data/                      ← Chỗ DUY NHẤT biết OkHttp/ConnectivityManager
+    │   ├── RealtimeRepositoryImpl.kt vòng lặp reconnect — mọi thứ khó nằm ở đây
+    │   └── AndroidNetworkMonitor.kt  ConnectivityManager → Flow
+    └── ui/
+        ├── SocketContract.kt         State + Intent + Effect
+        ├── SocketDebugViewModel.kt   reducer MVI
+        └── SocketDebugScreen.kt      Compose
 ```
 
 **Luật một chiều: `ui → domain ← data`.** Cả hai mũi tên chĩa vào `domain`. Tầng trong cùng
@@ -535,6 +563,48 @@ Kiểm chứng không cần tin ai: mở file bất kỳ trong `domain/`, nhìn 
 
 **Được gì:** đổi OkHttp sang thư viện khác ⇒ viết lại `data/`, `ui/` không đổi một dòng. Đó là toàn
 bộ giá trị của việc chia tầng. Nếu không đạt được điều đó thì chia tầng chỉ là tạo thêm folder.
+
+### Ai nối các tầng lại — DI bằng Koin
+
+Ba tầng nói chuyện qua interface, nhưng phải có **một chỗ** quyết định "khi ai đó cần
+`RealtimeRepository` thì đưa cho họ `RealtimeRepositoryImpl`". Chỗ đó là `di/SocketModule.kt`:
+
+```kotlin
+val socketModule = module {
+    single { CoroutineScope(SupervisorJob() + Dispatchers.Default) }   // scope theo process
+    single { BackoffPolicy() }
+    single { RealtimeRepositoryImpl.defaultClient() }                  // OkHttpClient + pingInterval
+
+    singleOf(::AndroidNetworkMonitor)  bind NetworkMonitor::class      // ← ranh giới Clean
+    singleOf(::RealtimeRepositoryImpl) bind RealtimeRepository::class  //   khai báo tường minh
+
+    viewModelOf(::SocketDebugViewModel)
+}
+```
+
+Hai chữ khoá cần hiểu:
+
+- **`single`** = **một instance duy nhất cho cả process**. Đây không phải chi tiết kỹ thuật vụn:
+  kết nối WebSocket **phải** là `single`, xem B6.
+- **`bind`** = "đăng ký cái này, nhưng ai hỏi thì đưa dưới dạng **interface**". Nhờ nó, không nơi
+  nào ngoài module này biết `RealtimeRepositoryImpl` tồn tại. Ranh giới Clean Architecture từ chỗ
+  là *quy ước ngầm* trở thành *một dòng khai báo*.
+
+`RealtimeLabApp.onCreate()` gọi `startKoin { modules(socketModule) }` — phải ở `Application`, không
+phải `Activity`: container giữ các singleton sống theo **process**, khởi tạo ở Activity thì chúng
+chết theo màn hình, đúng cái sai mà `single` sinh ra để tránh. Màn hình lấy ViewModel bằng
+`koinViewModel()`.
+
+> ⚠️ **Koin là service locator, không phải DI thật — biết trước để trả lời phỏng vấn.**
+> Nó không tiêm phụ thuộc lúc biên dịch mà **tra cứu theo kiểu lúc chạy**. Thiếu một binding thì
+> app **crash khi mở màn**, không phải lỗi build như Hilt/Dagger.
+>
+> Đổi lại: không codegen, không KSP, không Gradle plugin ⇒ không có rủi ro tương thích với AGP 9,
+> và trọng tâm ôn tập là realtime chứ không phải DI.
+>
+> **Lưới an toàn bắt buộc:** `SocketModuleTest` gọi `socketModule.verify()` để kiểm graph trong
+> unit test. **Không được xoá file test đó** — nó thay vai trò của compiler. Không có nó thì việc
+> đổi từ DI viết tay (compiler kiểm 100%) sang Koin là một đánh đổi xấu.
 
 ## B2. Luồng dữ liệu
 
@@ -734,15 +804,35 @@ log, chỉ làm app chậm nối lại — loại tệ nhất.
 
 ## B6. Ai sở hữu vòng đời kết nối
 
-**App sở hữu, không phải màn hình.**
+**App sở hữu, không phải màn hình.** Đây là câu hỏi kiến trúc quan trọng nhất của Bài 1, và nó
+được trả lời ở **hai chỗ phải khớp nhau**:
 
-`SocketGraph` giữ repository làm singleton theo Application. `SocketDebugViewModel.onCleared()`
-**chỉ dừng vòng ping đo RTT, KHÔNG gọi `disconnect()`**.
+| Chỗ | Khai báo gì |
+|---|---|
+| `SocketModule.kt` | `singleOf(::RealtimeRepositoryImpl)` — **một** instance cho cả process |
+| `SocketDebugViewModel.onCleared()` | **chỉ** dừng vòng ping đo RTT, **KHÔNG** gọi `disconnect()` |
 
-Bản trước gọi `disconnect()` trong `onCleared` và nó **tự phủ định lý do tồn tại của
-`SocketGraph`**: dựng singleton để kết nối sống lâu hơn màn hình, rồi giết nó ngay khi màn hình
-chết. Khi có hai màn dùng chung một kết nối thì hỏng thật: pop màn A ⇒ `onCleared` ⇒ `disconnect` ⇒
-màn B đứt kết nối.
+### Vì sao `single` chứ không phải `factory`
+
+Nếu repository là `factory` (Koin dựng mới mỗi lần ai hỏi) thì mỗi lần Activity bị huỷ hẳn rồi dựng
+lại, app có thêm:
+- một `OkHttpClient` mới, kèm thread pool và connection pool riêng;
+- một `NetworkCallback` mới **không ai gỡ** — vì `AndroidNetworkMonitor` dùng
+  `SharingStarted.Eagerly` (B4), callback đăng ký ngay và sống theo scope, nên đây là rò rỉ thật
+  chứ không phải lý thuyết.
+
+### Vì sao `onCleared` KHÔNG được `disconnect`
+
+Bản trước gọi `disconnect()` trong `onCleared`, và nó **tự phủ định lý do khai `single`**: dựng
+singleton để kết nối sống lâu hơn màn hình, rồi giết nó ngay khi màn hình chết.
+
+Khi có hai màn dùng chung một kết nối thì hỏng thật: pop màn A ⇒ `onCleared` ⇒ `disconnect` ⇒ **màn
+B đứt kết nối** dù nó chẳng làm gì sai.
+
+Ping thì ngược lại — nó **đúng là của màn hình**: chỉ để đo RTT cho màn debug này, không phải
+keep-alive (keep-alive là ping/pong tầng WebSocket ở A6, do OkHttp lo, nằm ở tầng data). `pingJob`
+sống trong `viewModelScope` nên tự chết cùng ViewModel; gọi `stopPingLoop()` tường minh chỉ để ý
+định hiện rõ ra.
 
 **Đã cân nhắc và loại phương án refcount** (`SharingStarted.WhileSubscribed`): URL do người dùng gõ
 ở runtime, nên khi subscriber cuối rời đi rồi có người mới vào, refcount **không biết phải nối lại
@@ -815,10 +905,13 @@ Ghi số đo vào bảng cuối `server/README.md`. **Chưa đo thì để `chư
   chặn. Tách module thì `build.gradle.kts` của domain không khai OkHttp ⇒ import sai là không
   compile. Đây mới là câu trả lời mạnh cho "làm sao bạn đảm bảo domain sạch?".
 - **Test cho vòng lặp reconnect** — cần `turbine` + `kotlinx-coroutines-test` + `mockwebserver`
-  (MockWebServer hỗ trợ WebSocket sẵn) + một `FakeNetworkMonitor`. Hiện chỉ có `BackoffPolicyTest`.
+  (MockWebServer hỗ trợ WebSocket sẵn) + một `FakeNetworkMonitor` (nạp bằng `loadKoinModules` đè
+  lên dòng `bind NetworkMonitor::class`). Hiện chỉ có `BackoffPolicyTest` và `SocketModuleTest`.
   Cũng chưa có test cho `reduce`, mà nó là hàm thuần — rẻ nhất để test.
 - **Dời logic RTT xuống tầng data** — `"PING:"` là format wire message, không phải việc của UI.
-- **`SocketGraph` → Hilt `@Singleton`** (hiện là service locator: static, không reset được giữa test).
+- **Verify DI lúc biên dịch** — Koin vẫn là service locator, `socketModule.verify()` chỉ chạy khi
+  có ai bấm test. Muốn compiler chặn thì hướng đi là `koin-annotations` (KSP) hoặc Hilt; cả hai đều
+  kéo theo codegen và rủi ro tương thích AGP 9, nên chưa làm.
 - **Hoist ViewModel ra khỏi `SocketDebugScreen`** (nhận `state` + `onIntent`) để `@Preview` được.
 - **`log: List<String>`** — `(s.log + line).takeLast(100)` cấp phát 2 list mỗi dòng log. Vô hại ở
   10s/ping, nhưng O(n) mỗi message khi throughput cao.
